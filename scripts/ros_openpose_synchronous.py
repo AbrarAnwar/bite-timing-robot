@@ -8,7 +8,7 @@ import argparse
 import message_filters
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
-from ros_openpose.msg import Frame, Person, BodyPart, Pixel
+from bite_timing_robot.msg import Frame, Person, BodyPart, Pixel
 from sensor_msgs.msg import Image, CameraInfo
 import os
 
@@ -19,7 +19,7 @@ rospy.init_node('ros_openpose')
 # py_openpose_path = rospy.get_param("~py_openpose_path")
 
 # py_openpose_path = os.path.expanduser('/usr/local/python')
-py_openpose_path = os.path.expanduser('/home/abrar/dining_extraction/deps/openpose/build/python')
+py_openpose_path = os.path.expanduser('/home/abrar/openpose/build/python')
 # py_openpose_path = os.path.expanduser('/home/abrar/installs/openpose/build/python/')
 
 try:
@@ -38,13 +38,15 @@ OPENPOSE1POINT7_OR_HIGHER = 'VectorDatum' in op.__dict__
 class rosOpenPose:
     def __init__(self, frame_id, no_depth, pub_topic, color_topic, depth_topic, cam_info_topic, op_wrapper, display):
 
-        self.pub1 = rospy.Publisher('/camera1/' + pub_topic, Frame, queue_size=10)
-        self.pub2 = rospy.Publisher('/camera2/' + pub_topic, Frame, queue_size=10)
-        self.pub3 = rospy.Publisher('/camera3/' + pub_topic, Frame, queue_size=10)
+        # self.pub1 = rospy.Publisher('/camera1/' + pub_topic, Frame, queue_size=10)
+        # self.pub2 = rospy.Publisher('/camera2/' + pub_topic, Frame, queue_size=10)
+        # self.pub3 = rospy.Publisher('/camera3/' + pub_topic, Frame, queue_size=10)
+        self.pub = rospy.Publisher(pub_topic, Frame, queue_size=10)
+        self.synced_image_pub = rospy.Publisher('/time_synced/' + color_topic, CompressedImage, queue_size=30*6)
 
-        self.synced_image_pub1 = rospy.Publisher('/camera1/' + color_topic + '/time_synced', CompressedImage, queue_size=10)
-        self.synced_image_pub2 = rospy.Publisher('/camera2/' + color_topic + '/time_synced', CompressedImage, queue_size=10)
-        self.synced_image_pub3 = rospy.Publisher('/camera3/' + color_topic + '/time_synced', CompressedImage, queue_size=10)
+        # self.synced_image_pub1 = rospy.Publisher('/camera1/' + color_topic + '/time_synced', CompressedImage, queue_size=10)
+        # self.synced_image_pub2 = rospy.Publisher('/camera2/' + color_topic + '/time_synced', CompressedImage, queue_size=10)
+        # self.synced_image_pub3 = rospy.Publisher('/camera3/' + color_topic + '/time_synced', CompressedImage, queue_size=10)
 
         self.frame_id = frame_id
         self.no_depth = no_depth
@@ -70,7 +72,7 @@ class rosOpenPose:
 
         # Obtain depth topic encoding
         # print('Waiting for depth topic...', depth_topic)
-        encoding = rospy.wait_for_message('/camera1/' + depth_topic, CompressedImage).format
+        encoding = rospy.wait_for_message(depth_topic, CompressedImage).format
         self.mm_to_m = 0.001 if "16UC1" in encoding else 1.
 
         # Function wrappers for OpenPose version discrepancies
@@ -83,15 +85,19 @@ class rosOpenPose:
 
         # image_sub = message_filters.Subscriber(color_topic, CompressedImage)
         # depth_sub = message_filters.Subscriber(depth_topic, CompressedImage)
-        subs = [message_filters.Subscriber('/camera1/' + color_topic, CompressedImage),
-                message_filters.Subscriber('/camera2/' + color_topic, CompressedImage),
-                message_filters.Subscriber('/camera3/' + color_topic, CompressedImage),
-                message_filters.Subscriber('/camera1/' + depth_topic, CompressedImage),
-                message_filters.Subscriber('/camera2/' + depth_topic, CompressedImage),
-                message_filters.Subscriber('/camera3/' + depth_topic, CompressedImage)]
 
+
+        # subs = [message_filters.Subscriber('/camera1/' + color_topic, CompressedImage),
+        #         message_filters.Subscriber('/camera2/' + color_topic, CompressedImage),
+        #         message_filters.Subscriber('/camera3/' + color_topic, CompressedImage),
+        #         message_filters.Subscriber('/camera1/' + depth_topic, CompressedImage),
+        #         message_filters.Subscriber('/camera2/' + depth_topic, CompressedImage),
+        #         message_filters.Subscriber('/camera3/' + depth_topic, CompressedImage)]
+        print(color_topic, depth_topic)
+        subs = [message_filters.Subscriber(color_topic, CompressedImage),
+                message_filters.Subscriber(depth_topic, CompressedImage)]
         print('registered')
-        self.ts = message_filters.ApproximateTimeSynchronizer(subs, 1, .01)
+        self.ts = message_filters.ApproximateTimeSynchronizer(subs, 1, .1)
         self.ts.registerCallback(self.callback)
 
         """ OpenPose skeleton dictionary
@@ -226,7 +232,6 @@ class rosOpenPose:
                         arr.point.y = y
                         arr.point.z = z
 
-        if self.display: self.frame = datum.cvOutputData.copy()
         pub.publish(fr)
         
         # change ros_image timestamp to match the frame timestamp
@@ -235,8 +240,7 @@ class rosOpenPose:
         return fr
 
 
-    # def callback(self, ros_image, ros_depth):
-    def callback(self, ros_image1, ros_image2, ros_image3, ros_depth1, ros_depth2, ros_depth3):
+    def callback(self, ros_image, ros_depth):
         # make sure we should be publishing in the first place!
         try:
             feature_processing_on = rospy.get_param("/feeding/biteTiming/featureProcessingOn")
@@ -247,11 +251,29 @@ class rosOpenPose:
             return 
 
         timestamp = rospy.Time.now()
-        # Process OpenPose
-        fr = self.processOpenPose(ros_image1, ros_depth1, timestamp, self.pub1, self.synced_image_pub1)
-        fr = self.processOpenPose(ros_image2, ros_depth2, timestamp, self.pub2, self.synced_image_pub2)
-        fr = self.processOpenPose(ros_image3, ros_depth3, timestamp, self.pub3, self.synced_image_pub3)
+        # timestamp = ros_image.header.stamp
 
+        # Process OpenPose
+        fr = self.processOpenPose(ros_image, ros_depth, timestamp, self.pub, self.synced_image_pub)
+
+        # print(1/(rospy.Time.now()-timestamp).to_sec())
+
+
+    # def callback(self, ros_image1, ros_image2, ros_image3, ros_depth1, ros_depth2, ros_depth3):
+    #     # make sure we should be publishing in the first place!
+    #     try:
+    #         feature_processing_on = rospy.get_param("/feeding/biteTiming/featureProcessingOn")
+    #     except:
+    #         feature_processing_on = False
+    #         print("/feeding/biteTiming/featureProcessingOn rosparam not set yet...")
+    #     if not feature_processing_on:
+    #         return 
+
+    #     timestamp = rospy.Time.now()
+    #     # Process OpenPose
+    #     fr = self.processOpenPose(ros_image1, ros_depth1, timestamp, self.pub1, self.synced_image_pub1)
+    #     fr = self.processOpenPose(ros_image2, ros_depth2, timestamp, self.pub2, self.synced_image_pub2)
+    #     fr = self.processOpenPose(ros_image3, ros_depth3, timestamp, self.pub3, self.synced_image_pub3)
 
 
 
@@ -278,7 +300,11 @@ def main():
         # Custom Params
         params = dict()
         # Can manually set params like this as well
-        params["model_folder"] = "/home/abrar/dining_extraction/deps/openpose/models"
+        params["model_folder"] = "/home/abrar/openpose/models"
+        params['number_people_max'] = 1
+        params['tracking'] = 1
+        params['render_pose'] = 0
+        params['display'] = 0
 
         # Any more obscure flags can be found through this for loop
         for i in range(0, len(args[1])):
@@ -300,7 +326,12 @@ def main():
         display = True if 'display' not in params or int(params['display']) > 0 else False
 
         # Start ros wrapper
-        rop = rosOpenPose(frame_id, no_depth, pub_topic, color_topic, depth_topic, cam_info_topic, op_wrapper, display)
+        # rop = rosOpenPose(frame_id, no_depth, pub_topic, color_topic, depth_topic, cam_info_topic, op_wrapper, display)
+        rop1 = rosOpenPose('camera1/'+frame_id, no_depth, 'camera1/'+pub_topic, 'camera1/'+color_topic, 'camera1/'+depth_topic, cam_info_topic, op_wrapper, display)
+        rop2 = rosOpenPose('camera2/'+frame_id, no_depth, 'camera2/'+pub_topic, 'camera2/'+color_topic, 'camera2/'+depth_topic, cam_info_topic, op_wrapper, display)
+        rop3 = rosOpenPose('camera3/'+frame_id, no_depth, 'camera3/'+pub_topic, 'camera3/'+color_topic, 'camera3/'+depth_topic, cam_info_topic, op_wrapper, display)
+
+
 
         # if display:
         #     while not rospy.is_shutdown():
