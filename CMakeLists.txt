@@ -25,6 +25,10 @@ add_message_files(
   Frame.msg
   AudioData.msg
 )
+add_service_files(
+  FILES
+  CheckBiteTiming.srv
+)
 
 generate_messages(
   DEPENDENCIES

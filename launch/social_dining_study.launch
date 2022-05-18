@@ -1,0 +1,14 @@
+<launch>
+    <!-- You can change the condition order using condition_order:="[even,mouth,learned]" as an argument -->
+
+    <arg name="condition_order" default="[mouth, even, learned]"/>
+    <arg name="kSubtrials" default="10"/>
+    <param name="/social_dining_study/kSubtrials" type="int" value="$(arg kSubtrials)" />
+    <param name="/social_dining_study/timingPerceptionOn" type="bool" value="False" />
+
+    <rosparam param="/social_dining_study/condition_order" subst_value="True">$(arg condition_order)</rosparam>
+
+
+    <node pkg="bite_timing_robot" name="bite_trigger" type="bite_trigger.py" output="screen"/>
+
+</launch>

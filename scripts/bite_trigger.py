@@ -9,6 +9,7 @@ import message_filters
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from bite_timing_robot.msg import Frame, Person, BodyPart, Pixel, AudioData
+from bite_timing_robot.srv import CheckBiteTiming, CheckBiteTimingResponse
 from sensor_msgs.msg import Image, CameraInfo
 import os
 
@@ -19,6 +20,8 @@ from std_msgs.msg import String, Int32
 import collections
 
 from sklearn.neighbors import NearestNeighbors
+
+import webrtc
 
 
 # Openpose stuff here
@@ -96,7 +99,7 @@ class OpenPose:
         for i in range(num_persons):
             for j in range(body_part_count):
                 u, v = int(U[i, j]), int(V[i, j])
-                if v < depth.shape[0] and u < depth.shape[1]:
+                if v < depth.shape[0] and u < depth.shape[1] and u > 0 and v > 0:
                     XYZ[i, j, 2] = depth[v, u]
 
         XYZ[:, :, 2] *= self.mm_to_m  # convert to meters
@@ -223,7 +226,6 @@ class BiteTrigger:
         self.openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
         self.last_seq_ = 0
         self.dropped_msgs_ = 0
-        print('creating audio sub')
         # subscribe to audio topic and register callback
 
         self.data_buffer1 = collections.deque(maxlen=180) # 180 is 6 seconds
@@ -237,19 +239,19 @@ class BiteTrigger:
         self.color_topic = color_topic
         self.depth_topic = depth_topic
 
-        self.create_data_subs()
+        # self.create_data_subs()
 
 
         self.last_bite_time = rospy.Time.now()
 
 
         # self.check_sub = rospy.Subscriber('/biteTiming/shouldFeed', String, self.check_callback)
-        rospy.Timer(rospy.Duration(3), self.check_callback)
+        # rospy.Timer(rospy.Duration(3), self.check_callback)
+        print('registering service')
+        self.check_service = rospy.Service("/check_bite_timing", CheckBiteTiming, self.check_callback)
 
-        self.trigger_pub = rospy.Publisher('/biteTiming/trigger', String, queue_size=10)
 
-
-        self.feeding_in_progress = False
+        self.feeding_in_progress = True
 
     def create_data_subs(self):
         self.subs1 = [message_filters.Subscriber("/camera1/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera1/' + self.depth_topic, CompressedImage)]
@@ -266,6 +268,9 @@ class BiteTrigger:
 
         self.audio_sub = rospy.Subscriber('/audio', AudioData, self.audio_callback)
         self.direction_sub = rospy.Subscriber('/sound_direction', Int32, self.direction_callback)
+
+
+        self.vad = webrtc.Vad(3)
 
 
     def delete_data_subs(self):
@@ -294,12 +299,6 @@ class BiteTrigger:
             self.direction_buffer.clear()
 
     def data1_callback(self, img, depth):
-        print('in data 1')
-        if self.last_seq_ + 1 != img.header.seq:
-            self.dropped_msgs_ = self.dropped_msgs_ + 1
-            print('messasge dropped. total dropped: ', self.dropped_msgs_, img.header.seq, self.last_seq_)
-        self.last_seq_ = img.header.seq
-
         recieved_time = rospy.Time.now()
         frame = self.openpose.processOpenPose(img, depth)
         # attach all relevant features here
@@ -325,12 +324,13 @@ class BiteTrigger:
         all_data = {'image':img, 'depth':depth, 'openpose':frame}        # add to buffer
         self.data_buffer3.append({'time':recieved_time, 'data':all_data})
 
+
+
     def audio_callback(self, msg):
         recieved_time = rospy.Time.now()
         audio = msg.data
 
         # TODO: process frame here
-        is_talking = 1
 
 
         # attach all relevant features here
@@ -390,12 +390,14 @@ class BiteTrigger:
 
     
     def check_callback(self, msg):
+        print("Service call recieved")
         # this is called every 3 seconds.
         if self.feeding_in_progress:
             # if feeding is in progress, we check a special rosparam that indicates "idle"
-            is_percieving = rospy.get_param("/feeding/facePerceptionOn")
+            is_percieving = rospy.get_param("/social_dining_study/timingPerceptionOn")
             if not is_percieving:
-                return
+                print("We are not percieving right now. Service was likely called at the wrong time.")
+                return CheckBiteTimingResponse(False)
             else:
                 # let's start taking data again
                 self.feeding_in_progress = False
@@ -405,16 +407,12 @@ class BiteTrigger:
         print('in check callback with size', len(self.data_buffer1), len(self.data_buffer2), len(self.data_buffer3))
         trigger = 0
 
-        if len(self.data_buffer1) < 180:
-            return
-        if len(self.data_buffer2) < 180:
-            return
-        if len(self.data_buffer3) < 180:
-            return
+        if len(self.data_buffer1) < 180 or len(self.data_buffer2) < 180 or len(self.data_buffer3) < 180:
+            print("Buffer is not full with 6 seconds of information yet...")
+            return CheckBiteTimingResponse(False)
+
             
         aligned_data = self.align_data()
-
-        # TODO: Add check if we should run the model
 
         # Call model with what we have in our buffer
         # trigger = evenly_spaced_trigger(timestamp)
@@ -423,50 +421,15 @@ class BiteTrigger:
 
         if trigger == 1:
             self.last_bite_time = rospy.Time.now()
-            self.trigger_pub.publish(String(""))
 
             self.feeding_in_progress = True
-            rospy.set_param("/feeding/is_percieving", False)
+            rospy.set_param("/social_dining_study/timingPerceptionOn", False)
 
             # delete all the subs. let us guarantee a call to this after feeding is done to reinitialize
             self.delete_data_subs()
 
-
-    # def callback(self, ros_image, openpose_frame):
-    def callback(self, ros_image1, openpose_frame1, ros_image2, openpose_frame2, ros_image3, openpose_frame3):
-        trigger = 0
-
-        timestamp = ros_image1.header.stamp
-        print(1/(rospy.Time.now() - ros_image1.header.stamp).to_sec(), 1/(rospy.Time.now() - ros_image2.header.stamp).to_sec(),1/(rospy.Time.now() - ros_image3.header.stamp).to_sec())
-
-        # Buffer is_talking, and other input data!
-        curr_data = (ros_image1, openpose_frame1, ros_image2, openpose_frame2, ros_image3, openpose_frame3)
-        self.data_buffer.append((timestamp, curr_data))
-
-        # We should only run if we have a full buffer, for the model's sake
-        if len(self.data_buffer) < 180:
-            return
-
-        # TODO: Add check if we should run the model
-
-        aligned_data = self.align_data()
-        
-
-        # Call model with what we have in our buffer
-        trigger = evenly_spaced_trigger(timestamp)
-
-        # Later, introduce switching behaviors depending on number of bites
-
-
-        
-        if trigger == 1:
-            self.last_bite_time = timestamp
-            self.trigger_pub.publish(String(""))
-
-            # Clear the buffer because the model will be turned off during feeding stage
-            self.data_buffer.clear()
-            self.audio_buffer.clear()
-            self.direction_buffer.clear()
+            return CheckBiteTimingResponse(True)
+        return CheckBiteTimingResponse(False)
 
     """
         Must output a 1 or a 0 for whether it should trigger or not
