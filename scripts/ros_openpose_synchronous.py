@@ -78,7 +78,8 @@ class rosOpenPose:
         # Function wrappers for OpenPose version discrepancies
         if OPENPOSE1POINT7_OR_HIGHER:
             self.emplaceAndPop = lambda datum: self.op_wrapper.emplaceAndPop(op.VectorDatum([datum]))
-            self.detect = lambda kp: kp is not None
+            # self.detect = lambda kp: kp is not None
+            self.detect = lambda kp: kp.ndim > 1
         else:
             self.emplaceAndPop = lambda datum: self.op_wrapper.emplaceAndPop([datum])
             self.detect = lambda kp: kp.shape != ()
@@ -127,7 +128,7 @@ class rosOpenPose:
         for i in range(num_persons):
             for j in range(body_part_count):
                 u, v = int(U[i, j]), int(V[i, j])
-                if v < depth.shape[0] and u < depth.shape[1]:
+                if v < depth.shape[0] and u < depth.shape[1] and v > 0 and u > 0:
                     XYZ[i, j, 2] = depth[v, u]
 
         XYZ[:, :, 2] *= self.mm_to_m  # convert to meters
@@ -157,9 +158,12 @@ class rosOpenPose:
         datum.cvInputData = image
         self.emplaceAndPop(datum)
 
-        pose_kp = datum.poseKeypoints
-        lhand_kp = datum.handKeypoints[0]
-        rhand_kp = datum.handKeypoints[1]
+        # pose_kp = datum.poseKeypoints
+        # lhand_kp = datum.handKeypoints[0]
+        # rhand_kp = datum.handKeypoints[1]
+        pose_kp = datum.getPoseKeypoints()
+        lhand_kp = datum.getLeftHandKeypoints()
+        rhand_kp = datum.getRightHandKeypoints()
 
         # Set number of people detected
         if self.detect(pose_kp):
@@ -176,6 +180,7 @@ class rosOpenPose:
 
         if self.detect(lhand_kp):
             lhand_detected = True
+            print(lhand_kp)
             hand_part_count = lhand_kp.shape[1]
 
         if self.detect(rhand_kp):
@@ -303,8 +308,9 @@ def main():
         params["model_folder"] = "/home/abrar/openpose/models"
         params['number_people_max'] = 1
         params['tracking'] = 1
-        params['render_pose'] = 0
+        params['render_pose'] = 1
         params['display'] = 0
+        params['net_resolution'] = "-1x256"
 
         # Any more obscure flags can be found through this for loop
         for i in range(0, len(args[1])):

@@ -12,9 +12,6 @@ from bite_timing_robot.msg import Frame, Person, BodyPart, Pixel, AudioData
 from sensor_msgs.msg import Image, CameraInfo
 import os
 
-# import multiprocessing
-from pathos.pools import ProcessPool
-
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String, Int32
 # from audio_common_msgs.msg import AudioData
@@ -50,6 +47,7 @@ class OpenPose:
         params['tracking'] = 1
         params['render_pose'] = 0
         params['display'] = 0
+        params['net_resolution'] = "-1x256"
 
         # Starting OpenPose
         op_wrapper = op.WrapperPython()
@@ -82,7 +80,7 @@ class OpenPose:
         # Function wrappers for OpenPose version discrepancies
         if OPENPOSE1POINT7_OR_HIGHER:
             self.emplaceAndPop = lambda datum: self.op_wrapper.emplaceAndPop(op.VectorDatum([datum]))
-            self.detect = lambda kp: kp is not None
+            self.detect = lambda kp: kp.ndim > 1
         else:
             self.emplaceAndPop = lambda datum: self.op_wrapper.emplaceAndPop([datum])
             self.detect = lambda kp: kp.shape != ()
@@ -127,9 +125,12 @@ class OpenPose:
         datum.cvInputData = image
         self.emplaceAndPop(datum)
 
-        pose_kp = datum.poseKeypoints
-        lhand_kp = datum.handKeypoints[0]
-        rhand_kp = datum.handKeypoints[1]
+        # pose_kp = datum.poseKeypoints
+        # lhand_kp = datum.handKeypoints[0]
+        # rhand_kp = datum.handKeypoints[1]
+        pose_kp = datum.getPoseKeypoints()
+        lhand_kp = datum.getLeftHandKeypoints()
+        rhand_kp = datum.getRightHandKeypoints()
 
         # Set number of people detected
         if self.detect(pose_kp):
@@ -219,10 +220,11 @@ class BiteTrigger:
         self.bridge = CvBridge()
 
         self.frame = None
-
+        self.openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
+        self.last_seq_ = 0
+        self.dropped_msgs_ = 0
         print('creating audio sub')
         # subscribe to audio topic and register callback
-        audio_sub = rospy.Subscriber('/audio', AudioData, self.audio_callback)
 
         self.data_buffer1 = collections.deque(maxlen=180) # 180 is 6 seconds
         self.data_buffer2 = collections.deque(maxlen=180) # 180 is 6 seconds
@@ -232,39 +234,76 @@ class BiteTrigger:
         self.direction_buffer = collections.deque(maxlen=180*4)
 
 
-        data_subs1 = [message_filters.Subscriber("/camera1/" + color_topic, CompressedImage), message_filters.Subscriber('/camera1/' + depth_topic, CompressedImage)]
-        self.data_sub1 = message_filters.ApproximateTimeSynchronizer(data_subs1, 5, .01)
-        self.data_sub1.registerCallback(self.data1_callback)
+        self.color_topic = color_topic
+        self.depth_topic = depth_topic
 
-        data_subs2 = [message_filters.Subscriber("/camera2/" + color_topic, CompressedImage), message_filters.Subscriber('/camera2/' + depth_topic, CompressedImage)]
-        self.data_sub2 = message_filters.ApproximateTimeSynchronizer(data_subs2, 5, .01)
-        self.data_sub2.registerCallback(self.data2_callback)
-
-        data_subs3 = [message_filters.Subscriber("/camera3/" + color_topic, CompressedImage), message_filters.Subscriber('/camera3/' + depth_topic, CompressedImage)]
-        self.data_sub3 = message_filters.ApproximateTimeSynchronizer(data_subs3, 5, .01)
-        self.data_sub3.registerCallback(self.data3_callback)
-
-
-        print('creating diretion sub')
-        direction_sub = rospy.Subscriber('/sound_direction', Int32, self.direction_callback)
-
+        self.create_data_subs()
 
 
         self.last_bite_time = rospy.Time.now()
 
 
-        self.check_sub = rospy.Subscriber('/biteTiming/shouldFeed', String, self.check_callback)
+        # self.check_sub = rospy.Subscriber('/biteTiming/shouldFeed', String, self.check_callback)
+        rospy.Timer(rospy.Duration(3), self.check_callback)
 
         self.trigger_pub = rospy.Publisher('/biteTiming/trigger', String, queue_size=10)
 
-        self.openpose1 = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
-        self.openpose2 = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
 
+        self.feeding_in_progress = False
+
+    def create_data_subs(self):
+        self.subs1 = [message_filters.Subscriber("/camera1/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera1/' + self.depth_topic, CompressedImage)]
+        self.data_sub1 = message_filters.ApproximateTimeSynchronizer(self.subs1, 180*4 , .01)
+        self.data_sub1.registerCallback(self.data1_callback)
+
+        self.subs2 = [message_filters.Subscriber("/camera2/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera2/' + self.depth_topic, CompressedImage)]
+        self.data_sub2 = message_filters.ApproximateTimeSynchronizer(self.subs2, 180*4, .01)
+        self.data_sub2.registerCallback(self.data2_callback)
+
+        self.subs3 = [message_filters.Subscriber("/camera3/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera3/' + self.depth_topic, CompressedImage)]
+        self.data_sub3 = message_filters.ApproximateTimeSynchronizer(self.subs3, 180*4, .01)
+        self.data_sub3.registerCallback(self.data3_callback)
+
+        self.audio_sub = rospy.Subscriber('/audio', AudioData, self.audio_callback)
+        self.direction_sub = rospy.Subscriber('/sound_direction', Int32, self.direction_callback)
+
+
+    def delete_data_subs(self):
+            for sub in self.subs1:
+                sub.sub.unregister()
+                del sub
+            for sub in self.subs2:
+                sub.sub.unregister()
+                del sub
+            for sub in self.subs3:
+                sub.sub.unregister()
+                del sub
+
+            self.audio_sub.unregister()
+            self.direction_sub.unregister()
+            del self.audio_sub
+            del self.direction_sub
+
+
+            # Clear the buffer because the model will be turned off during feeding stage
+            self.data_buffer1.clear()
+            self.data_buffer2.clear()
+            self.data_buffer3.clear()
+
+            self.audio_buffer.clear()
+            self.direction_buffer.clear()
 
     def data1_callback(self, img, depth):
+        print('in data 1')
+        if self.last_seq_ + 1 != img.header.seq:
+            self.dropped_msgs_ = self.dropped_msgs_ + 1
+            print('messasge dropped. total dropped: ', self.dropped_msgs_, img.header.seq, self.last_seq_)
+        self.last_seq_ = img.header.seq
+
         recieved_time = rospy.Time.now()
+        frame = self.openpose.processOpenPose(img, depth)
         # attach all relevant features here
-        all_data = {'image':img, 'depth':depth}
+        all_data = {'image':img, 'depth':depth, 'openpose':frame}
         # add to buffer
         
         self.data_buffer1.append({'time':recieved_time, 'data':all_data})
@@ -272,16 +311,18 @@ class BiteTrigger:
     def data2_callback(self, img, depth):
         recieved_time = rospy.Time.now()
         # attach all relevant features here
-        all_data = {'image':img, 'depth':depth}
-        # add to buffer
+        frame = self.openpose.processOpenPose(img, depth)
+        # attach all relevant features here
+        all_data = {'image':img, 'depth':depth, 'openpose':frame}        # add to buffer
         self.data_buffer2.append({'time':recieved_time, 'data':all_data})
 
 
     def data3_callback(self, img, depth):
         recieved_time = rospy.Time.now()
         # attach all relevant features here
-        all_data = {'image':img, 'depth':depth}
-        # add to buffer
+        frame = self.openpose.processOpenPose(img, depth)
+        # attach all relevant features here
+        all_data = {'image':img, 'depth':depth, 'openpose':frame}        # add to buffer
         self.data_buffer3.append({'time':recieved_time, 'data':all_data})
 
     def audio_callback(self, msg):
@@ -340,36 +381,27 @@ class BiteTrigger:
         print(len(audio_mapping))
 
         print(audio_mapping)
-
-        prev = rospy.Time.now()
-
-
-        for i in range(180):
-            fr = self.openpose.processOpenPose(self.data_buffer1[i]['data']['image'],self.data_buffer1[i]['data']['depth'])
-            fr = self.openpose.processOpenPose(self.data_buffer2[i]['data']['image'],self.data_buffer2[i]['data']['depth'])
-            fr = self.openpose.processOpenPose(self.data_buffer3[i]['data']['image'],self.data_buffer3[i]['data']['depth'])
-
-        # pool = multiprocessing.Pool(processes=4)
-        # pool = ProcessPool(nodes=4)
-
-        # inputs = [ (self.data_buffer1[i]['data']['image'],self.data_buffer1[i]['data']['depth']) for i in range(180)]
-        # pool.map(self.openpose.processOpenPose, inputs)
-
-
-        now = rospy.Time.now()
-        print((now-prev).to_sec())
-
-
-        # these are now mapped at 30fps. We should now compute openpose on all of these in a batch, so it's faster!
-
+        t = rospy.Time.now().to_sec() 
+        print((t - video_times[0])-6)
 
 
 
         # convert rospy times to regular floats
-        exit()
 
     
     def check_callback(self, msg):
+        # this is called every 3 seconds.
+        if self.feeding_in_progress:
+            # if feeding is in progress, we check a special rosparam that indicates "idle"
+            is_percieving = rospy.get_param("/feeding/facePerceptionOn")
+            if not is_percieving:
+                return
+            else:
+                # let's start taking data again
+                self.feeding_in_progress = False
+                self.create_data_subs()
+
+
         print('in check callback with size', len(self.data_buffer1), len(self.data_buffer2), len(self.data_buffer3))
         trigger = 0
 
@@ -385,21 +417,19 @@ class BiteTrigger:
         # TODO: Add check if we should run the model
 
         # Call model with what we have in our buffer
-        trigger = evenly_spaced_trigger(timestamp)
-
+        # trigger = evenly_spaced_trigger(timestamp)
+        trigger = 1
         # Later, introduce switching behaviors depending on number of bites
 
         if trigger == 1:
-            self.last_bite_time = timestamp
+            self.last_bite_time = rospy.Time.now()
             self.trigger_pub.publish(String(""))
 
-            # Clear the buffer because the model will be turned off during feeding stage
-            self.data_buffer1.clear()
-            self.data_buffer2.clear()
-            self.data_buffer3.clear()
+            self.feeding_in_progress = True
+            rospy.set_param("/feeding/is_percieving", False)
 
-            self.audio_buffer.clear()
-            self.direction_buffer.clear()
+            # delete all the subs. let us guarantee a call to this after feeding is done to reinitialize
+            self.delete_data_subs()
 
 
     # def callback(self, ros_image, openpose_frame):
