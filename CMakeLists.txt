@@ -24,6 +24,8 @@ add_message_files(
   Person.msg
   Frame.msg
   AudioData.msg
+  GazeData.msg
+  Orientation.msg
 )
 add_service_files(
   FILES
