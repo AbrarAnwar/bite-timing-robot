@@ -69,8 +69,8 @@ class BiteTrigger:
         # self.face_openposes = [self.face_openpose, self.face_openpose, self.face_openpose]
         self.openposes = [self.openpose, self.openpose, self.openpose] # 
 
-        self.rt_gene = RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage))
-        self.rt_genes = [self.rt_gene, self.rt_gene, self.rt_gene]
+        # self.rt_gene = RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage))
+        # self.rt_genes = [self.rt_gene, self.rt_gene, self.rt_gene]
         # self.rt_genes = [RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage)) for _ in range(3)] # 16-17 fps for all 3 at the same time
 
         self.last_seq_1 = 0
@@ -173,8 +173,17 @@ class BiteTrigger:
                 sub.sub.unregister()
                 del sub
 
+            self.gaze_sub1.unregister()
+            self.gaze_sub2.unregister()
+            self.gaze_sub3.unregister()
+
             self.audio_sub.unregister()
             self.direction_sub.unregister()
+
+            del self.gaze_sub1
+            del self.gaze_sub2
+            del self.gaze_sub3
+
             del self.audio_sub
             del self.direction_sub
 
@@ -189,6 +198,9 @@ class BiteTrigger:
 
             self.audio_buffer.clear()
             self.direction_buffer.clear()
+
+            self.last_seq_1 = 0
+            self.last_seq_2 = 0
 
     ########################################################################################################################
     ### Openpose and image callbacks
@@ -218,7 +230,7 @@ class BiteTrigger:
 
             self.test_pub1.publish("bleh")        
             finish = rospy.Time.now().to_sec()
-            print('pose processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
+            # print('pose processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
             self.last_process_time = finish
         
 
@@ -256,7 +268,7 @@ class BiteTrigger:
         if num_callback == 0:
             # self.test_pub.publish("bleh")        
             finish = rospy.Time.now().to_sec()
-            print('face processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
+            # print('face processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
             self.last_process_time = finish
 
     ########################################################################################################################
@@ -274,7 +286,7 @@ class BiteTrigger:
 
             if self.last_seq_2 + 2 != msg.header.seq:
                 self.dropped_msgs_2 += 1
-                print("gaze Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", msg.header.seq, " last seq: ", self.last_seq_2)
+                print("bite_trigger. gaze Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", msg.header.seq, " last seq: ", self.last_seq_2)
                 print(num_callback, thread_idx, num_threads)
                 print(msg.header.seq, msg.header.seq % num_threads)
             self.last_seq_2 = msg.header.seq
@@ -285,17 +297,15 @@ class BiteTrigger:
         # attach all relevant features here
 
 
-        print('in gaze sub', num_callback, msg.header.seq)
         all_data = {'header':msg.header, 'gaze':msg.gaze, 'headpose':msg.headpose}
         # add to buffer
         with self.mutex:
             self.gaze_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
-        print('gaze buffer size: ', len(self.gaze_buffers[num_callback]))
 
         # look at callback 0 to verify speed
         if num_callback == 0:
             finish = rospy.Time.now().to_sec()
-            print('gaze processing time: \t', msg.header.seq, 1/(finish-self.last_process_time))
+            # print('gaze processing time: \t', msg.header.seq, 1/(finish-self.last_process_time))
             self.last_process_time = finish
 
         
@@ -392,18 +402,10 @@ class BiteTrigger:
         gaze_times = []
         gaze_seqs = []
         for item in gaze_buffers[0]:
-            print(item)
             gaze_seqs.append(item['data']['header'].stamp)
             gaze_times.append(item['time'].to_sec())
 
         gaze_seqs = np.array(gaze_seqs)
-
-        # get max of seqs
-        print(gaze_seqs)
-        print(video_seqs)
-
-        print(gaze_times)
-        print(video_times)
 
         max_gaze_seq = np.max(gaze_seqs)
         max_video_seq = np.max(video_seqs)
@@ -468,7 +470,9 @@ class BiteTrigger:
 
         who_is_talking = self.who_is_talking(is_talking, direction_data)
 
-
+        print(direction_data)
+        print(is_talking)
+        print(who_is_talking)
 
         t = rospy.Time.now().to_sec() 
         print((t - video_times[0])-6)
@@ -501,7 +505,7 @@ class BiteTrigger:
         trigger = 0
 
         for buffer in self.data_buffers:
-            if len(buffer) < 180:
+            if len(buffer) < 100: # a little higher than 6 seconds to deal with latency alignment issues
                 print("Buffer is not full with 6 seconds of information yet...", len(buffer))
                 return CheckBiteTimingResponse(False)
 
@@ -512,10 +516,7 @@ class BiteTrigger:
             
         aligned_data = self.align_data()
 
-        # Call model with what we have in our buffer
-        # trigger = evenly_spaced_trigger(timestamp)
         trigger = 1
-        # Later, introduce switching behaviors depending on number of bites
 
         if trigger == 1:
             self.last_bite_time = rospy.Time.now()
@@ -528,29 +529,6 @@ class BiteTrigger:
 
             return CheckBiteTimingResponse(True)
         return CheckBiteTimingResponse(False)
-
-    """
-        Must output a 1 or a 0 for whether it should trigger or not
-    """
-    def evenly_spaced_trigger(current_time):
-        print('Time since last bite', timestamp.to_sec() - self.last_bite_time.to_sec())
-
-        if timestamp.to_sec() - self.last_bite_time.to_sec() >= 23.5:
-            return 1
-        return 0
-
-    def paznet_trigger():
-        # align the buffers using nearest neighbor, which produces input to the model
-
-
-
-        # call the model given the input
-
-        raise NotImplementedError
-
-    def mouth_open_trigger():
-        # this one will probably change a rosparam flag!
-        raise NotImplementedError
 
         
 def main():

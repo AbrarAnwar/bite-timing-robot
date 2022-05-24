@@ -102,7 +102,7 @@ class RTGeneSyncr:
         if num_callback == 0:
             if self.last_seq_2 + 2 != img.header.seq:
                 self.dropped_msgs_2 += 1
-                print("gaze Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", img.header.seq, " last seq: ", self.last_seq_2)
+                print("rt_gene sync. gaze Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", img.header.seq, " last seq: ", self.last_seq_2)
                 print(num_callback, thread_idx, num_threads)
                 print(img.header.seq, img.header.seq % num_threads)
             self.last_seq_2 = img.header.seq
@@ -132,7 +132,7 @@ class RTGeneSyncr:
         # look at callback 0 to verify speed
         if num_callback == 0:
             finish = rospy.Time.now().to_sec()
-            print('gaze processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
+            # print('gaze processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
             self.last_process_time = finish
 
         

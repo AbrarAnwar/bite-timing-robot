@@ -1,0 +1,3 @@
+<launch>
+    <node pkg="bite_timing_robot" name="bite_trigger" type="bite_trigger.py" output="screen"/>
+</launch>
