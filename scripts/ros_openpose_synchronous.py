@@ -86,7 +86,7 @@ class rosOpenPose:
 
         # image_sub = message_filters.Subscriber(color_topic, CompressedImage)
         # depth_sub = message_filters.Subscriber(depth_topic, CompressedImage)
-
+        self.face = True
 
         # subs = [message_filters.Subscriber('/camera1/' + color_topic, CompressedImage),
         #         message_filters.Subscriber('/camera2/' + color_topic, CompressedImage),
@@ -158,84 +158,121 @@ class rosOpenPose:
         datum.cvInputData = image
         self.emplaceAndPop(datum)
 
-        # pose_kp = datum.poseKeypoints
-        # lhand_kp = datum.handKeypoints[0]
-        # rhand_kp = datum.handKeypoints[1]
-        pose_kp = datum.getPoseKeypoints()
-        lhand_kp = datum.getLeftHandKeypoints()
-        rhand_kp = datum.getRightHandKeypoints()
+        if self.face:
+            face_kp = datum.getFaceKeypoints()
+            if self.detect(face_kp):
+                num_persons = face_kp.shape[0]
+                face_part_count = face_kp.shape[1]
+            else:
+                num_persons = 0
+                body_part_count = 0
+            
+            fr.persons = [Person() for _ in range(num_persons)]
 
-        # Set number of people detected
-        if self.detect(pose_kp):
-            num_persons = pose_kp.shape[0]
-            body_part_count = pose_kp.shape[1]
-        else:
-            num_persons = 0
-            body_part_count = 0
-
-        # Check to see if hands were detected
-        lhand_detected = False
-        rhand_detected = False
-        hand_part_count = 0
-
-        if self.detect(lhand_kp):
-            lhand_detected = True
-            print(lhand_kp)
-            hand_part_count = lhand_kp.shape[1]
-
-        if self.detect(rhand_kp):
-            rhand_detected = True
-            hand_part_count = rhand_kp.shape[1]
-
-        # Handle body points
-        fr.persons = [Person() for _ in range(num_persons)]
-        if num_persons != 0:
-            # Perform vectorized 3D computation for body keypoints
-            b_XYZ = self.compute_3D_vectorized(pose_kp, depth)
-
-            # Perform the vectorized operation for left hand
-            if lhand_detected:
-                lh_XYZ = self.compute_3D_vectorized(lhand_kp, depth)
-
-            # Do same for right hand
-            if rhand_detected:
-                rh_XYZ = self.compute_3D_vectorized(rhand_kp, depth)
-
-            for person in range(num_persons):
-                fr.persons[person].bodyParts = [BodyPart() for _ in range(body_part_count)]
-                fr.persons[person].leftHandParts = [BodyPart() for _ in range(hand_part_count)]
-                fr.persons[person].rightHandParts = [BodyPart() for _ in range(hand_part_count)]
-
-                detected_hands = []
-                if lhand_detected:
-                    detected_hands.append((lhand_kp, fr.persons[person].leftHandParts, lh_XYZ))
-                if rhand_detected:
-                    detected_hands.append((rhand_kp, fr.persons[person].rightHandParts, rh_XYZ))
-
-                # Process the body
-                for bp in range(body_part_count):
-                    u, v, s = pose_kp[person, bp]
-                    x, y, z = b_XYZ[person, bp]
-                    arr = fr.persons[person].bodyParts[bp]
-                    arr.pixel.x = u
-                    arr.pixel.y = v
-                    arr.score = s
-                    arr.point.x = x
-                    arr.point.y = y
-                    arr.point.z = z
-
-                # Process left and right hands
-                for kp, harr, h_XYZ in detected_hands:
-                    for hp in range(hand_part_count):
-                        u, v, s = kp[person, hp]
-                        x, y, z = h_XYZ[person, hp]
-                        arr = harr[hp]
+            if num_persons != 0:
+                f_XYZ = self.compute_3D_vectorized(face_kp, depth)
+                # Process face
+                for person in range(num_persons):
+                    fr.persons[person].bodyParts = [BodyPart() for _ in range(0)]
+                    fr.persons[person].leftHandParts = [BodyPart() for _ in range(0)]
+                    fr.persons[person].rightHandParts = [BodyPart() for _ in range(0)]
+                    fr.persons[person].face = [BodyPart() for _ in range(face_part_count)]
+                
+                    for bp in range(face_part_count):
+                        u, v, s = face_kp[person, bp]
+                        x, y, z = f_XYZ[person, bp]
+                        arr = fr.persons[person].face[bp]
                         arr.pixel.x = u
                         arr.pixel.y = v
                         arr.score = s
                         arr.point.x = x
                         arr.point.y = y
                         arr.point.z = z
+            print('bleh', face_kp)
+
+        else:
+
+            # pose_kp = datum.poseKeypoints
+            # lhand_kp = datum.handKeypoints[0]
+            # rhand_kp = datum.handKeypoints[1]
+            pose_kp = datum.getPoseKeypoints()
+            lhand_kp = datum.getLeftHandKeypoints()
+            rhand_kp = datum.getRightHandKeypoints()
+
+            # print(pose_kp)
+            # Set number of people detected
+            if self.detect(pose_kp):
+                num_persons = pose_kp.shape[0]
+                body_part_count = pose_kp.shape[1]
+            else:
+                num_persons = 0
+                body_part_count = 0
+            face_part_count = 0 # always zero for this case
+
+            # Check to see if hands were detected
+            lhand_detected = False
+            rhand_detected = False
+            hand_part_count = 0
+
+            if self.detect(lhand_kp):
+                lhand_detected = True
+                # print(lhand_kp)
+                hand_part_count = lhand_kp.shape[1]
+
+            if self.detect(rhand_kp):
+                rhand_detected = True
+                hand_part_count = rhand_kp.shape[1]
+
+            # Handle body points
+            fr.persons = [Person() for _ in range(num_persons)]
+            if num_persons != 0:
+                # Perform vectorized 3D computation for body keypoints
+                b_XYZ = self.compute_3D_vectorized(pose_kp, depth)
+
+                # Perform the vectorized operation for left hand
+                if lhand_detected:
+                    lh_XYZ = self.compute_3D_vectorized(lhand_kp, depth)
+
+                # Do same for right hand
+                if rhand_detected:
+                    rh_XYZ = self.compute_3D_vectorized(rhand_kp, depth)
+
+                for person in range(num_persons):
+                    fr.persons[person].bodyParts = [BodyPart() for _ in range(body_part_count)]
+                    fr.persons[person].leftHandParts = [BodyPart() for _ in range(hand_part_count)]
+                    fr.persons[person].rightHandParts = [BodyPart() for _ in range(hand_part_count)]
+                    fr.persons[person].face = [BodyPart() for _ in range(face_part_count)]
+
+                    detected_hands = []
+                    if lhand_detected:
+                        detected_hands.append((lhand_kp, fr.persons[person].leftHandParts, lh_XYZ))
+                    if rhand_detected:
+                        detected_hands.append((rhand_kp, fr.persons[person].rightHandParts, rh_XYZ))
+
+                    # Process the body
+                    for bp in range(body_part_count):
+                        u, v, s = pose_kp[person, bp]
+                        x, y, z = b_XYZ[person, bp]
+                        arr = fr.persons[person].bodyParts[bp]
+                        arr.pixel.x = u
+                        arr.pixel.y = v
+                        arr.score = s
+                        arr.point.x = x
+                        arr.point.y = y
+                        arr.point.z = z
+
+                    # Process left and right hands
+                    for kp, harr, h_XYZ in detected_hands:
+                        for hp in range(hand_part_count):
+                            u, v, s = kp[person, hp]
+                            x, y, z = h_XYZ[person, hp]
+                            arr = harr[hp]
+                            arr.pixel.x = u
+                            arr.pixel.y = v
+                            arr.score = s
+                            arr.point.x = x
+                            arr.point.y = y
+                            arr.point.z = z
 
         pub.publish(fr)
         
@@ -311,6 +348,21 @@ def main():
         params['render_pose'] = 1
         params['display'] = 0
         params['net_resolution'] = "-1x256"
+        # params['hand'] = True
+        # params['hand_net_resolution'] = "320x320"
+
+
+        # if hand:
+        # params['body'] = 1
+        # params['hand'] = True
+        # params['hand_detector'] = 0
+
+        # # if face:
+        params['face'] = 1
+        params['face_net_resolution'] = "320x320"
+        params['face_detector'] = 1
+        params['body'] = 0
+
 
         # Any more obscure flags can be found through this for loop
         for i in range(0, len(args[1])):

@@ -21,7 +21,22 @@ import collections
 
 from sklearn.neighbors import NearestNeighbors
 
-import webrtc
+import webrtcvad
+import io
+from scipy.io import wavfile
+from scipy.io.wavfile import write
+
+
+PERSON1 = -180 # +/- 180
+PERSON2 = 60
+PERSON3 = -60
+
+
+from tqdm import tqdm
+
+from rt_gene.extract_landmarks_method_base import LandmarkMethodBase
+from rt_gene.gaze_tools import get_phi_theta_from_euler, limit_yaw
+from rt_gene.gaze_tools_standalone import euler_from_matrix
 
 
 # Openpose stuff here
@@ -39,8 +54,8 @@ except ImportError as e:
 OPENPOSE1POINT7_OR_HIGHER = 'VectorDatum' in op.__dict__
 
 class OpenPose:
-    
-    def __init__(self, depth_msg_example, frame_id):
+    # NOTE: We remove depth, but the option to keep it as False is not implemented
+    def __init__(self, depth_msg_example, frame_id, face=False, body=1, no_depth=True):
 
         # Custom Params
         params = dict()
@@ -48,16 +63,39 @@ class OpenPose:
         params["model_folder"] = "/home/abrar/openpose/models"
         params['number_people_max'] = 1
         params['tracking'] = 1
-        params['render_pose'] = 0
+        params['render_pose'] = 1
         params['display'] = 0
         params['net_resolution'] = "-1x256"
+        # params['disable_multi_thread'] = True
+
+        if face:
+            params['face'] = 1
+            params['face_net_resolution'] = "320x320"
+            params['face_detector'] = 1
+            params['body'] = 0
+
+        params['face'] = 1
+        params['face_net_resolution'] = "320x320"
+        params['face_detector'] = 1
+        params['body'] = 1
+        params['disable_multi_thread'] = True
+
+
+        if not body:
+            params['face_detector'] = 1
+            params['body'] = 0
+
 
         # Starting OpenPose
+        # op_wrapper = op.WrapperPython(op.ThreadManagerMode.Asynchronous) # performance decrease bc of cpu bottleneck
         op_wrapper = op.WrapperPython()
         op_wrapper.configure(params)
         op_wrapper.start()
 
         self.op_wrapper = op_wrapper
+
+        self.no_depth = no_depth
+
         # Populate necessary K matrix values for 3D pose computation.
         # cam_info = rospy.wait_for_message(cam_info_topic, CameraInfo)
         # self.fx = cam_info.K[0]
@@ -71,12 +109,12 @@ class OpenPose:
         self.cy = 251.594
 
         self.frame_id = frame_id
-        self.no_depth = False
 
         self.bridge = CvBridge()
 
         self.frame = None
 
+        self.face = face
         encoding = depth_msg_example.format
         self.mm_to_m = 0.001 if "16UC1" in encoding else 1.
 
@@ -96,6 +134,16 @@ class OpenPose:
         # Extract the appropriate depth readings
         num_persons, body_part_count = U.shape
         XYZ = np.zeros((num_persons, body_part_count, 3), dtype=np.float32)
+
+        if self.no_depth:
+            U = kp[:, :, 0]
+            V = kp[:, :, 1]
+            XYZ[:, :, 0] = U
+            XYZ[:, :, 1] = V
+            # leave Z as 0
+            return XYZ
+
+
         for i in range(num_persons):
             for j in range(body_part_count):
                 u, v = int(U[i, j]), int(V[i, j])
@@ -110,7 +158,8 @@ class OpenPose:
         XYZ[:, :, 1] = (Z / self.fy) * (V - self.cy)
         return XYZ
 
-    def processOpenPose(self, ros_image, ros_depth):
+    # def processOpenPose(self, ros_image, ros_depth):
+    def processOpenPose(self, ros_image, ros_depth=None): # removing depth for the moment!
         # Construct a frame with current time !before! pushing to OpenPose
         fr = Frame()
         fr.header.frame_id = self.frame_id
@@ -119,7 +168,8 @@ class OpenPose:
         image = depth = None
         try:
             image = self.bridge.compressed_imgmsg_to_cv2(ros_image)
-            depth = self.bridge.compressed_imgmsg_to_cv2(ros_depth, "passthrough")
+            if not self.no_depth:
+                depth = self.bridge.compressed_imgmsg_to_cv2(ros_depth, "passthrough")
         except CvBridgeError as e:
             rospy.logerr("CvBridge Error: {0}".format(e))
 
@@ -134,7 +184,9 @@ class OpenPose:
         pose_kp = datum.getPoseKeypoints()
         lhand_kp = datum.getLeftHandKeypoints()
         rhand_kp = datum.getRightHandKeypoints()
+        face_kp = datum.getFaceKeypoints()
 
+        # print(pose_kp)
         # Set number of people detected
         if self.detect(pose_kp):
             num_persons = pose_kp.shape[0]
@@ -142,6 +194,13 @@ class OpenPose:
         else:
             num_persons = 0
             body_part_count = 0
+        
+        if self.detect(face_kp):
+            num_faces = face_kp.shape[0]
+            face_part_count = face_kp.shape[1]
+        else:
+            num_faces = 0
+            face_part_count = 0
 
         # Check to see if hands were detected
         lhand_detected = False
@@ -150,6 +209,7 @@ class OpenPose:
 
         if self.detect(lhand_kp):
             lhand_detected = True
+            # print(lhand_kp)
             hand_part_count = lhand_kp.shape[1]
 
         if self.detect(rhand_kp):
@@ -174,6 +234,7 @@ class OpenPose:
                 fr.persons[person].bodyParts = [BodyPart() for _ in range(body_part_count)]
                 fr.persons[person].leftHandParts = [BodyPart() for _ in range(hand_part_count)]
                 fr.persons[person].rightHandParts = [BodyPart() for _ in range(hand_part_count)]
+                fr.persons[person].face = [BodyPart() for _ in range(0)] # to begin with. changed below
 
                 detected_hands = []
                 if lhand_detected:
@@ -205,11 +266,185 @@ class OpenPose:
                         arr.point.x = x
                         arr.point.y = y
                         arr.point.z = z
-        
+
+            if num_faces != 0:
+                for person in range(num_persons):
+                    f_XYZ = self.compute_3D_vectorized(face_kp, depth)
+                    fr.persons[person].face = [BodyPart() for _ in range(face_part_count)]
+
+                    # Process face
+                    for bp in range(face_part_count):
+                        u, v, s = face_kp[person, bp]
+
+                        x, y, z = f_XYZ[person, bp]
+                        arr = fr.persons[person].face[bp]
+                        arr.pixel.x = u
+                        arr.pixel.y = v
+                        arr.score = s
+                        arr.point.x = x
+                        arr.point.y = y
+                        arr.point.z = z
+    
         return fr
 
 
-# Import Openpose (Ubuntu)
+class RTGene:
+    """
+    This class is used to perform the real-time processing of the data gaze data.
+    """
+
+    def __init__(self, img_msg_example, model_nets_path='~/rt_gene/rt_gene/model_nets'):
+        """
+        Initialize the class.
+        """
+        self.bridge = CvBridge()
+
+        self.model_nets_path = os.path.expanduser(model_nets_path)
+        tqdm.write('Loading networks')
+        self.landmark_estimator = LandmarkMethodBase(device_id_facedetection='cuda:0',
+                                                checkpoint_path_face=os.path.join(self.model_nets_path, "SFD/s3fd_facedetector.pth"),
+                                                checkpoint_path_landmark=os.path.join(self.model_nets_path, "phase1_wpdc_vdc.pth.tar"),
+                                                model_points_file=os.path.join(self.model_nets_path, "face_model_68.txt"))
+        print('loaded landmark_estimator')
+
+        from rt_gene.estimate_gaze_pytorch import GazeEstimator
+        print('Loading model', os.path.join(self.model_nets_path, 'gaze_model_pytorch_vgg16_prl_mpii_allsubjects1.model'))
+        self.gaze_estimator = GazeEstimator("cuda:0", [os.path.join(self.model_nets_path, 'gaze_model_pytorch_vgg16_prl_mpii_allsubjects1.model')])
+
+        print('loaded gaze_estimator')
+
+        # get camera params
+        image = None
+        try:
+            image = self.bridge.compressed_imgmsg_to_cv2(img_msg_example)
+        except CvBridgeError as e:
+            rospy.logerr("CvBridge Error: {0}".format(e))
+
+        im_width, im_height = image.shape[1], image.shape[0]
+        tqdm.write('WARNING!!! You should provide the camera calibration file, otherwise you might get bad results. Using a crude approximation!')
+        self.dist_coefficients, self.camera_matrix = np.zeros((1, 5)), np.array(
+            [[im_height, 0.0, im_width / 2.0], [0.0, im_height, im_height / 2.0], [0.0, 0.0, 1.0]])
+
+    def process(self, ros_image):
+        """
+        Process the data.
+        """
+
+        # Convert images to cv2 matrices
+        image = None
+        try:
+            image = self.bridge.compressed_imgmsg_to_cv2(ros_image)
+        except CvBridgeError as e:
+            rospy.logerr("CvBridge Error: {0}".format(e))
+
+
+        gaze, headpose = self.estimate_gaze(image, self.dist_coefficients, self.camera_matrix)
+        
+        return gaze, headpose
+
+
+    def load_camera_calibration(self, calibration_file):
+        import yaml
+        with open(calibration_file, 'r') as f:
+            cal = yaml.safe_load(f)
+
+        dist_coefficients = np.array(cal['distortion_coefficients']['data'], dtype='float32').reshape(1, 5)
+        camera_matrix = np.array(cal['camera_matrix']['data'], dtype='float32').reshape(3, 3)
+
+        return dist_coefficients, camera_matrix
+
+
+    def extract_eye_image_patches(self, subjects):
+        for subject in subjects:
+            le_c, re_c, _, _ = subject.get_eye_image_from_landmarks(subject, self.landmark_estimator.eye_image_size)
+            subject.left_eye_color = le_c
+            subject.right_eye_color = re_c
+
+
+    def estimate_gaze(self, color_img, dist_coefficients, camera_matrix):
+        faceboxes = self.landmark_estimator.get_face_bb(color_img)
+        if len(faceboxes) == 0:
+            tqdm.write('Could not find faces in the image')
+            return None, None
+
+        subjects = self.landmark_estimator.get_subjects_from_faceboxes(color_img, faceboxes)
+        self.extract_eye_image_patches(subjects)
+
+        input_r_list = []
+        input_l_list = []
+        input_head_list = []
+        valid_subject_list = []
+
+        for idx, subject in enumerate(subjects):
+            if subject.left_eye_color is None or subject.right_eye_color is None:
+                tqdm.write('Failed to extract eye image patches')
+                continue
+
+            success, rotation_vector, _ = cv2.solvePnP(self.landmark_estimator.model_points,
+                                                    subject.landmarks.reshape(len(subject.landmarks), 1, 2),
+                                                    cameraMatrix=camera_matrix,
+                                                    distCoeffs=dist_coefficients, flags=cv2.SOLVEPNP_DLS)
+
+            if not success:
+                tqdm.write('Not able to extract head pose for subject {}'.format(idx))
+                continue
+
+            _rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+            _rotation_matrix = np.matmul(_rotation_matrix, np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]]))
+            _m = np.zeros((4, 4))
+            _m[:3, :3] = _rotation_matrix
+            _m[3, 3] = 1
+            # Go from camera space to ROS space
+            _camera_to_ros = [[0.0, 0.0, 1.0, 0.0],
+                            [-1.0, 0.0, 0.0, 0.0],
+                            [0.0, -1.0, 0.0, 0.0],
+                            [0.0, 0.0, 0.0, 1.0]]
+            roll_pitch_yaw = list(euler_from_matrix(np.dot(_camera_to_ros, _m)))
+            roll_pitch_yaw = limit_yaw(roll_pitch_yaw)
+
+            phi_head, theta_head = get_phi_theta_from_euler(roll_pitch_yaw)
+
+            # commented out to save rendering compute
+            # face_image_resized = cv2.resize(subject.face_color, dsize=(224, 224), interpolation=cv2.INTER_CUBIC)
+            # head_pose_image = self.landmark_estimator.visualize_headpose_result(face_image_resized, (phi_head, theta_head))
+
+
+
+            input_r_list.append(self.gaze_estimator.input_from_image(subject.right_eye_color))
+            input_l_list.append(self.gaze_estimator.input_from_image(subject.left_eye_color))
+            input_head_list.append([theta_head, phi_head])
+            valid_subject_list.append(idx)
+
+        if len(valid_subject_list) == 0:
+            return None, None
+
+        gaze_est = self.gaze_estimator.estimate_gaze_twoeyes(inference_input_left_list=input_l_list,
+                                                        inference_input_right_list=input_r_list,
+                                                        inference_headpose_list=input_head_list)
+
+        # comment out visualization
+        # for subject_id, gaze, headpose in zip(valid_subject_list, gaze_est.tolist(), input_head_list):
+        #     subject = subjects[subject_id]
+        #     # Build visualizations
+        #     r_gaze_img = self.gaze_estimator.visualize_eye_result(subject.right_eye_color, gaze)
+        #     l_gaze_img = self.gaze_estimator.visualize_eye_result(subject.left_eye_color, gaze)
+        #     s_gaze_img = np.concatenate((r_gaze_img, l_gaze_img), axis=1)
+
+        gazes = []
+        headposes = []
+        for subject_id, gaze, headpose in zip(valid_subject_list, gaze_est.tolist(), input_head_list):
+            gazes.append([gaze[1], gaze[0]])
+            headposes.append([headpose[1], headpose[0]])
+
+        if len(gazes) == 0:
+            return None, None
+
+        return gaze_est[0], headposes[0]
+
+
+
+
+
 rospy.init_node('bite_trigger')
 
 class BiteTrigger:
@@ -223,14 +458,40 @@ class BiteTrigger:
         self.bridge = CvBridge()
 
         self.frame = None
+
+        # self.openposes = []
+        # for i in range(3):
+        #     self.openposes.append(OpenPose(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage), self.frame_id, face=False))
+        
+        # self.face_openposes = []
+        # for i in range(3):
+        #     self.face_openposes.append(OpenPose(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage), self.frame_id, face=True))
+
+
         self.openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
-        self.last_seq_ = 0
-        self.dropped_msgs_ = 0
+        self.openposes = [self.openpose, self.openpose, self.openpose]
+
+        # NOTE: UNCOMMENT THE ONE BELOW IF I DON'T WANT TO USE BODY DETECTION (like for target participant!)
+        self.face_openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id, face=True, body=False)
+        # self.face_openposes = [self.face_openpose, self.face_openpose, self.face_openpose]
+        self.openposes = [self.openpose, self.openpose, self.face_openpose] # 
+
+        self.rt_gene = RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage))
+        self.rt_genes = [self.rt_gene, self.rt_gene, self.rt_gene]
+        # self.rt_genes = [RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage)) for _ in range(3)] # 16-17 fps for all 3 at the same time
+
+        self.last_seq_1 = 0
+        self.dropped_msgs_1 = 0
+        self.last_seq_2 = 0
+        self.dropped_msgs_2 = 0
         # subscribe to audio topic and register callback
 
-        self.data_buffer1 = collections.deque(maxlen=180) # 180 is 6 seconds
-        self.data_buffer2 = collections.deque(maxlen=180) # 180 is 6 seconds
-        self.data_buffer3 = collections.deque(maxlen=180) # 180 is 6 seconds
+        self.data_buffers = [collections.deque(maxlen=180) for _ in range(3)] # 180 is 6 seconds
+
+        self.face_buffers = [collections.deque(maxlen=180) for _ in range(3)] # 180 is 6 seconds
+
+        self.gaze_buffers = [collections.deque(maxlen=180) for _ in range(3)] # 180 is 6 seconds
+
 
         self.audio_buffer = collections.deque(maxlen=180*4)
         self.direction_buffer = collections.deque(maxlen=180*4)
@@ -238,9 +499,6 @@ class BiteTrigger:
 
         self.color_topic = color_topic
         self.depth_topic = depth_topic
-
-        # self.create_data_subs()
-
 
         self.last_bite_time = rospy.Time.now()
 
@@ -252,25 +510,56 @@ class BiteTrigger:
 
 
         self.feeding_in_progress = True
+        self.vad = webrtcvad.Vad(3)
+        # test pub publishes a string
+        # self.test_pub = rospy.Publisher('/biteTiming/test', String, queue_size=10)
+        self.test_pub1 = rospy.Publisher('/camera1/openpose', String, queue_size=10000)
+        self.test_pub2 = rospy.Publisher('/camera1/gaze', String, queue_size=10000)
 
     def create_data_subs(self):
-        self.subs1 = [message_filters.Subscriber("/camera1/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera1/' + self.depth_topic, CompressedImage)]
-        self.data_sub1 = message_filters.ApproximateTimeSynchronizer(self.subs1, 180*4 , .01)
-        self.data_sub1.registerCallback(self.data1_callback)
+        print('Creating data subs')
+        queue_size = 180*180
+        buff_size = 65536*180
+        num_threads = 1
 
-        self.subs2 = [message_filters.Subscriber("/camera2/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera2/' + self.depth_topic, CompressedImage)]
-        self.data_sub2 = message_filters.ApproximateTimeSynchronizer(self.subs2, 180*4, .01)
-        self.data_sub2.registerCallback(self.data2_callback)
+        gaze_num_threads = 1
+        
 
-        self.subs3 = [message_filters.Subscriber("/camera3/" + self.color_topic, CompressedImage), message_filters.Subscriber('/camera3/' + self.depth_topic, CompressedImage)]
-        self.data_sub3 = message_filters.ApproximateTimeSynchronizer(self.subs3, 180*4, .01)
-        self.data_sub3.registerCallback(self.data3_callback)
+
+        # self.subs1 = [message_filters.Subscriber("/camera1/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size), message_filters.Subscriber('/camera1/' + self.depth_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+        self.subs1 = [message_filters.Subscriber("/camera1/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+
+        self.data_sub1 = message_filters.ApproximateTimeSynchronizer(self.subs1, queue_size, .1)
+        for i in range(num_threads):
+            self.data_sub1.registerCallback(lambda img, i=i: self.data_callback(img, 0, i, num_threads))
+        for i in range(gaze_num_threads):
+            self.data_sub1.registerCallback(lambda img, i=i: self.gaze_callback(img, 0, i, gaze_num_threads))
+
+        # self.subs2 = [message_filters.Subscriber("/camera2/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size), message_filters.Subscriber('/camera2/' + self.depth_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+        self.subs2 = [message_filters.Subscriber("/camera2/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+        self.data_sub2 = message_filters.ApproximateTimeSynchronizer(self.subs2, queue_size, .1)
+        for i in range(num_threads):
+            self.data_sub2.registerCallback(lambda img, i=i: self.data_callback(img, 1, i, num_threads))
+        for i in range(gaze_num_threads):
+            self.data_sub2.registerCallback(lambda img, i=i: self.gaze_callback(img, 1, i, gaze_num_threads))
+
+        # self.subs3 = [message_filters.Subscriber("/camera3/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size), message_filters.Subscriber('/camera3/' + self.depth_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+        self.subs3 = [message_filters.Subscriber("/camera3/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+
+        self.data_sub3 = message_filters.ApproximateTimeSynchronizer(self.subs3, queue_size, .1)
+        for i in range(num_threads):
+            self.data_sub3.registerCallback(lambda img, i=i: self.data_callback(img, 2, i, num_threads))
+        for i in range(gaze_num_threads):
+            self.data_sub3.registerCallback(lambda img, i=i: self.gaze_callback(img, 2, i, gaze_num_threads))
+
 
         self.audio_sub = rospy.Subscriber('/audio', AudioData, self.audio_callback)
         self.direction_sub = rospy.Subscriber('/sound_direction', Int32, self.direction_callback)
 
+        print('Data subs created')
 
-        self.vad = webrtc.Vad(3)
+        self.last_process_time = 0
+
 
 
     def delete_data_subs(self):
@@ -291,47 +580,153 @@ class BiteTrigger:
 
 
             # Clear the buffer because the model will be turned off during feeding stage
-            self.data_buffer1.clear()
-            self.data_buffer2.clear()
-            self.data_buffer3.clear()
+            for buffer in self.data_buffers:
+                buffer.clear()
+            for buffer in self.face_buffers:
+                buffer.clear()
+            for buffer in self.gaze_buffers:
+                buffer.clear()
 
             self.audio_buffer.clear()
             self.direction_buffer.clear()
 
-    def data1_callback(self, img, depth):
+    ########################################################################################################################
+    ### Openpose and image callbacks
+    ########################################################################################################################
+    def data_callback(self, img, num_callback, thread_idx, num_threads):
+        if img.header.seq % 2 == 0:
+            return # drop every other frame!
+
+        if not(img.header.seq % num_threads == thread_idx):
+            return
+
+        if num_callback == 0:
+            if self.last_seq_1+ 2 != img.header.seq:
+                self.dropped_msgs_1 += 1
+                print("Openpose Processing Dropped msg: ", self.dropped_msgs_1, " seq: ", img.header.seq, " last seq: ", self.last_seq_1)
+            self.last_seq_1 = img.header.seq
+
+
         recieved_time = rospy.Time.now()
-        frame = self.openpose.processOpenPose(img, depth)
-        # attach all relevant features here
-        all_data = {'image':img, 'depth':depth, 'openpose':frame}
-        # add to buffer
+        frame = self.openposes[num_callback].processOpenPose(img)
+        all_data = {'image':img, 'openpose':frame}
+        self.data_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
+
+        # ideally gaze is computed in its own callback, but cpu restrictions make it difficult
+        # gaze, headpose = self.rt_genes[num_callback].process(img)
+        # all_data = {'gaze':gaze, 'headpose':headpose}
+        # self.gaze_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
+
+        if num_callback == 0:
+            # for debugging
+
+            self.test_pub1.publish("bleh")        
+            finish = rospy.Time.now().to_sec()
+            print('pose processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
+            self.last_process_time = finish
         
-        self.data_buffer1.append({'time':recieved_time, 'data':all_data})
 
-    def data2_callback(self, img, depth):
+
+    ########################################################################################################################
+    ### face data callbacks
+    ########################################################################################################################
+    def face_callback(self, img, num_callback, thread_idx, num_threads):
+        if img.header.seq % 2 == 0:
+            return # drop every other frame!
+
+        if not(img.header.seq % num_threads == thread_idx):
+            return
+        # check only on one thread
+        if num_callback == 0:
+
+            if self.last_seq_2 + 2 != img.header.seq:
+                self.dropped_msgs_2 += 1
+                print("Face Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", img.header.seq, " last seq: ", self.last_seq_2)
+                print(num_callback, thread_idx, num_threads)
+                print(img.header.seq, img.header.seq % num_threads)
+            self.last_seq_2 = img.header.seq
+
+
         recieved_time = rospy.Time.now()
+        frame = self.face_openposes[num_callback].processOpenPose(img)
         # attach all relevant features here
-        frame = self.openpose.processOpenPose(img, depth)
-        # attach all relevant features here
-        all_data = {'image':img, 'depth':depth, 'openpose':frame}        # add to buffer
-        self.data_buffer2.append({'time':recieved_time, 'data':all_data})
+
+        all_data = {'openpose':frame}
+        # add to buffer
+        self.face_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
+
+        # look at callback 0 to verify speed
+        if num_callback == 0:
+            # self.test_pub.publish("bleh")        
+            finish = rospy.Time.now().to_sec()
+            print('face processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
+            self.last_process_time = finish
+
+    ########################################################################################################################
+    ### gaze data callbacks
+    ########################################################################################################################
+    
+    def gaze_callback(self, img, num_callback, thread_idx, num_threads):
+        if img.header.seq % 2 == 0:
+            return # drop every other frame!
+
+        if not(img.header.seq % num_threads == thread_idx):
+            return
+        # check only on one thread
+        if num_callback == 0:
+
+            if self.last_seq_2 + 2 != img.header.seq:
+                self.dropped_msgs_2 += 1
+                print("gaze Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", img.header.seq, " last seq: ", self.last_seq_2)
+                print(num_callback, thread_idx, num_threads)
+                print(img.header.seq, img.header.seq % num_threads)
+            self.last_seq_2 = img.header.seq
 
 
-    def data3_callback(self, img, depth):
         recieved_time = rospy.Time.now()
+        # frame = self.face_openposes[num_callback].processOpenPose(img, depth)
         # attach all relevant features here
-        frame = self.openpose.processOpenPose(img, depth)
-        # attach all relevant features here
-        all_data = {'image':img, 'depth':depth, 'openpose':frame}        # add to buffer
-        self.data_buffer3.append({'time':recieved_time, 'data':all_data})
+        gaze, headpose = self.rt_genes[num_callback].process(img)
 
+        all_data = {'gaze':gaze, 'headpose':headpose}
+        # add to buffer
+        self.gaze_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
 
+        # look at callback 0 to verify speed
+        if num_callback == 0:
+            self.test_pub2.publish("bleh")        
+            finish = rospy.Time.now().to_sec()
+            print('gaze processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
+            self.last_process_time = finish
+
+        
+
+    ########################################################################################################################
+    ### Audio processing Callbacks
+    ########################################################################################################################
+
+    def convert_bytearray_to_wav_ndarray(self, input_bytearray, sampling_rate=16000):
+        bytes_wav = bytes()
+        byte_io = io.BytesIO(bytes_wav)
+        write(byte_io, sampling_rate, np.frombuffer(input_bytearray, dtype=np.int16))
+        output_wav = byte_io.read()
+        samplerate, output = wavfile.read(io.BytesIO(output_wav))
+        return output, samplerate
+
+    def get_binary_speaking(self, x):
+        wav, sr = self.convert_bytearray_to_wav_ndarray(x)
+        is_speeches = []
+        for window in np.lib.stride_tricks.sliding_window_view(wav, 640)[::80]:
+            is_speech = self.vad.is_speech(window, 16000)
+            is_speeches.append(is_speech)
+        return np.array(is_speeches).mean() > .7
 
     def audio_callback(self, msg):
         recieved_time = rospy.Time.now()
         audio = msg.data
 
-        # TODO: process frame here
-
+        # process frame here
+        is_talking = self.get_binary_speaking(msg.data)
 
         # attach all relevant features here
         all_data = {'audio': audio, 'is_talking': is_talking}
@@ -344,6 +739,31 @@ class BiteTrigger:
         direction = msg.data
         self.direction_buffer.append({'time':recieved_time, 'data':direction})
 
+
+    def who_is_talking(self, is_talking, directions):
+        # nearest neighbor audio directions, but first sin/cos them
+        directions = np.array(directions)
+        sin_directions = np.sin(np.radians(directions))
+
+        person_directions = np.array([PERSON1, PERSON2, PERSON3])
+        person_sin_dirs = np.sin(np.radians(person_directions))
+
+
+        nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(np.array(person_sin_dirs).reshape(-1,1))
+        dists, idxs = nbrs.kneighbors(np.array(sin_directions).reshape(-1,1))
+        person_annotations = idxs[:, 0] + 1
+
+        # now, combine person annotations and is_talking
+        is_talking = np.array(is_talking) # binary annotations
+        who_is_talking = person_annotations * is_talking
+        print(who_is_talking)
+
+        return who_is_talking
+
+
+    ########################################################################################################################
+    ### ROS Service management
+    ########################################################################################################################
     def align_data(self):
         # we have 3 data inputs, direction, audio, and video
         # they are inside data_buffer, audio_buffer, and direction_buffer
@@ -351,7 +771,7 @@ class BiteTrigger:
         # these are a deque of size 180 of format (time, (data1, data2, ...))
         video_times = []
         video_data = []
-        for item in self.data_buffer1: # using only buffer 1
+        for item in self.data_buffers[0]: # using only buffer 1
             video_times.append(item['time'].to_sec())
             video_data.append(item['data'])
 
@@ -361,12 +781,14 @@ class BiteTrigger:
             audio_times.append(item['time'].to_sec())
             audio_data.append(item['data'])
 
-
         direction_times = []
         direction_data = []
         for item in self.direction_buffer:
             direction_times.append(item['time'].to_sec())
             direction_data.append(item['data'])
+        # NOTE THIS COULD BE EMPTY!!!
+
+
 
             
         nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(np.array(direction_times).reshape(-1,1))
@@ -377,10 +799,18 @@ class BiteTrigger:
         dists, idxs = nbrs.kneighbors(np.array(video_times).reshape(-1,1))
         audio_mapping = idxs[:, 0]
 
+        # get who is speaking annotations
+        direction_data = np.array(direction_data)[dir_mapping]
+        audio_data = np.array(audio_data)[audio_mapping]
+        is_talking = [item['is_talking'] for item in audio_data]
+        print(len(is_talking), len(direction_data))
         print(len(dir_mapping))
         print(len(audio_mapping))
 
-        print(audio_mapping)
+        who_is_talking = self.who_is_talking(is_talking, direction_data)
+
+
+
         t = rospy.Time.now().to_sec() 
         print((t - video_times[0])-6)
 
@@ -391,6 +821,10 @@ class BiteTrigger:
     
     def check_callback(self, msg):
         print("Service call recieved")
+        num_bites = msg.num_bites
+        time_since_last_bite = msg.time_since_last_bite
+        time_since_start = msg.time_since_start
+        
         # this is called every 3 seconds.
         if self.feeding_in_progress:
             # if feeding is in progress, we check a special rosparam that indicates "idle"
@@ -404,12 +838,17 @@ class BiteTrigger:
                 self.create_data_subs()
 
 
-        print('in check callback with size', len(self.data_buffer1), len(self.data_buffer2), len(self.data_buffer3))
+        # print('in check callback with size', len(self.data_buffer1), len(self.data_buffer2), len(self.data_buffer3))
         trigger = 0
 
-        if len(self.data_buffer1) < 180 or len(self.data_buffer2) < 180 or len(self.data_buffer3) < 180:
-            print("Buffer is not full with 6 seconds of information yet...")
-            return CheckBiteTimingResponse(False)
+        for buffer in self.data_buffers:
+            if len(buffer) < 180:
+                print("Buffer is not full with 6 seconds of information yet...", len(buffer))
+                return CheckBiteTimingResponse(False)
+
+        # if len(self.face_buffer1) < 180 or len(self.face_buffer2) < 180 or len(self.face_buffer3) < 180:
+            # print("Buffer is not full with 6 seconds of information yet...")
+            # return CheckBiteTimingResponse(False)
 
             
         aligned_data = self.align_data()

@@ -1,3 +1,5 @@
-string condition
+int64 num_bites
+float64 time_since_last_bite
+float64 time_since_start
 ---
 bool trigger
