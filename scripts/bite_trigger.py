@@ -9,7 +9,7 @@ import message_filters
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from bite_timing_robot.msg import Frame, Person, BodyPart, Pixel, AudioData, GazeData, Orientation
-from bite_timing_robot.srv import CheckBiteTiming, CheckBiteTimingResponse
+from bite_timing_robot.srv import CheckBiteTiming, CheckBiteTimingResponse, MouthOpen, MouthOpenResponse
 from sensor_msgs.msg import Image, CameraInfo
 import os
 
@@ -62,12 +62,12 @@ class BiteTrigger:
 
 
         self.openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
-        self.openposes = [self.openpose, self.openpose, self.openpose]
+        # self.openposes = [self.openpose, self.openpose, self.openpose]
 
         # NOTE: UNCOMMENT THE ONE BELOW IF I DON'T WANT TO USE BODY DETECTION (like for target participant!)
-        # self.face_openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id, face=True, body=False)
+        self.face_openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id, face=True, body=False)
         # self.face_openposes = [self.face_openpose, self.face_openpose, self.face_openpose]
-        self.openposes = [self.openpose, self.openpose, self.openpose] # 
+        self.openposes = [self.face_openpose, self.openpose, self.openpose] # 
 
         # self.rt_gene = RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage))
         # self.rt_genes = [self.rt_gene, self.rt_gene, self.rt_gene]
@@ -100,6 +100,8 @@ class BiteTrigger:
         # rospy.Timer(rospy.Duration(3), self.check_callback)
         print('registering service')
         self.check_service = rospy.Service("/check_bite_timing", CheckBiteTiming, self.check_callback)
+
+        self.mouth_open_service = rospy.Service("/mouth_open", MouthOpen, self.mouth_open_callback)
 
 
         self.feeding_in_progress = True
@@ -530,6 +532,59 @@ class BiteTrigger:
             return CheckBiteTimingResponse(True)
         return CheckBiteTimingResponse(False)
 
+    ########################################################################################################################
+    ### Mouth open service callback
+    ########################################################################################################################
+
+    def mouth_open_callback(self, msg):
+        # check if mouth is open using the front camera
+        print("Mouth open service called")
+
+        # wait for message in camera3
+        img = rospy.wait_for_message("/camera1/" + self.color_topic, CompressedImage)
+
+        # pass into openpose
+        frame = self.openposes[0].processOpenPose(img)
+        print(frame)
+
+        out = MouthOpenResponse(False)
+
+        mouth_open = False
+        mouth_points = []
+        if len(frame.persons) > 0:
+            if len(frame.persons[0].face) > 0:
+                mouth_points.append(frame.persons[0].face[50].point)
+                mouth_points.append(frame.persons[0].face[51].point)
+                mouth_points.append(frame.persons[0].face[52].point)
+                mouth_points.append(frame.persons[0].face[56].point)
+                mouth_points.append(frame.persons[0].face[57].point)
+                mouth_points.append(frame.persons[0].face[58].point)
+                mouth_points.append(frame.persons[0].face[61].point)
+                mouth_points.append(frame.persons[0].face[62].point)
+                mouth_points.append(frame.persons[0].face[63].point)
+                mouth_points.append(frame.persons[0].face[65].point)
+                mouth_points.append(frame.persons[0].face[66].point)
+                mouth_points.append(frame.persons[0].face[67].point)
+
+        if len(mouth_points) > 0:
+
+            lipDist = np.sqrt(pow((mouth_points[10].x - mouth_points[7].x), 2) + \
+                                        pow((mouth_points[10].y - mouth_points[7].y), 2))
+
+            lipThickness = np.sqrt(pow((mouth_points[1].x - mouth_points[7].x), 2) + \
+                            pow((mouth_points[1].y - mouth_points[7].y), 2)) / 2.0 + \
+                np.sqrt(pow((mouth_points[4].x - mouth_points[10].x), 2) + \
+                    pow((mouth_points[4].y - mouth_points[10].y), 2)) / 2
+
+            if (lipDist >= 1.0 * lipThickness):
+                mouthOpen = True
+            else:
+                mouthOpen = False
+        
+        else:
+            mouthOpen = False
+
+        return mouthOpen
         
 def main():
 

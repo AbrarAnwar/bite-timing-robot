@@ -45,16 +45,16 @@ class OpenPose:
             params['face_detector'] = 1
             params['body'] = 0
 
-        # params['face'] = 1
-        # params['face_net_resolution'] = "320x320"
+        params['face'] = 1
+        params['face_net_resolution'] = "320x320"
         # params['face_detector'] = 1
         # params['body'] = 1
         params['disable_multi_thread'] = True
 
 
-        # if not body:
-        #     params['face_detector'] = 1
-        #     params['body'] = 0
+        if not body:
+            params['face_detector'] = 1
+            params['body'] = 0
 
 
         # Starting OpenPose
@@ -238,22 +238,27 @@ class OpenPose:
                         arr.point.y = y
                         arr.point.z = z
 
-            if num_faces != 0:
-                for person in range(num_persons):
-                    f_XYZ = self.compute_3D_vectorized(face_kp, depth)
-                    fr.persons[person].face = [BodyPart() for _ in range(face_part_count)]
+        if num_faces != 0:
+            if self.face:
+                num_persons = num_faces
+                # print(num_faces)
+                fr.persons = [Person() for _ in range(num_persons)]
 
-                    # Process face
-                    for bp in range(face_part_count):
-                        u, v, s = face_kp[person, bp]
+            for person in range(num_persons):
+                f_XYZ = self.compute_3D_vectorized(face_kp, depth)
+                fr.persons[person].face = [BodyPart() for _ in range(face_part_count)]
 
-                        x, y, z = f_XYZ[person, bp]
-                        arr = fr.persons[person].face[bp]
-                        arr.pixel.x = u
-                        arr.pixel.y = v
-                        arr.score = s
-                        arr.point.x = x
-                        arr.point.y = y
-                        arr.point.z = z
+                # Process face
+                for bp in range(face_part_count):
+                    u, v, s = face_kp[person, bp]
+
+                    x, y, z = f_XYZ[person, bp]
+                    arr = fr.persons[person].face[bp]
+                    arr.pixel.x = u
+                    arr.pixel.y = v
+                    arr.score = s
+                    arr.point.x = x
+                    arr.point.y = y
+                    arr.point.z = z
     
         return fr
