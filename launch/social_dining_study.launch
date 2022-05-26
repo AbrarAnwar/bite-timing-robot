@@ -11,6 +11,9 @@
     <!-- also launch gaze_proc.launch -->
     <include file="$(find bite_timing_robot)/launch/gaze_proc.launch"></include>
     <include file="$(find bite_timing_robot)/launch/bite_trigger.launch"></include>
+    <include file="$(find bite_timing_robot)/launch/play_sound.launch"></include>
+
+    <!-- Launch play sound node -->
 
 
 
