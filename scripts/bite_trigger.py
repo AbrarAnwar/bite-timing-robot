@@ -31,6 +31,8 @@ from openpose_processor import OpenPose
 
 import copy
 
+from ml_models import SocialDiningModel
+
 PERSON1 = -180 # +/- 180
 PERSON2 = 60
 PERSON3 = -60
@@ -107,13 +109,14 @@ class BiteTrigger:
         self.feeding_in_progress = True
         self.vad = webrtcvad.Vad(3)
         # test pub publishes a string
-        # self.test_pub = rospy.Publisher('/biteTiming/test', String, queue_size=10)
         self.test_pub1 = rospy.Publisher('/camera1/openpose', String, queue_size=10000)
         # self.test_pub2 = rospy.Publisher('/camera1/gaze', String, queue_size=10000)
 
         self.last_process_time = 0
 
         # a lock to prevent race conditions
+
+        self.model = SocialDiningModel('Linear SVM')
 
         self.mutex = Lock()
 
@@ -462,6 +465,7 @@ class BiteTrigger:
         dists, idxs = nbrs.kneighbors(np.array(video_times).reshape(-1,1))
         audio_mapping = idxs[:, 0]
 
+
         # get who is speaking annotations
         direction_data = np.array(direction_data)[dir_mapping]
         audio_data = np.array(audio_data)[audio_mapping]
@@ -479,10 +483,23 @@ class BiteTrigger:
         t = rospy.Time.now().to_sec() 
         print((t - video_times[0])-6)
 
+        # need to return the following:
+        # aligned pose frames 1,2,3, gazes 1,2,3
+        # who's talking 1,2,3
+        # time, count (given by callback messages)
+        out_feats = {}
+        out_feats['pose_1'] = data_buffers[0][video_idxs]['data']
+        out_feats['pose_2'] = data_buffers[1][video_idxs]['data']
+        out_feats['pose_3'] = data_buffers[2][video_idxs]['data']
 
+        out_feats['gaze_1'] = gaze_buffers[0][gaze_idxs]['data']
+        out_feats['gaze_2'] = gaze_buffers[1][gaze_idxs]['data']
+        out_feats['gaze_3'] = gaze_buffers[2][gaze_idxs]['data']
 
-        # convert rospy times to regular floats
+        out_feats['who_is_talking'] = who_is_talking # should already be indexed by video_idxs
+        
 
+        return out_feats
     
     def check_callback(self, msg):
         print("Service call recieved")
@@ -517,6 +534,14 @@ class BiteTrigger:
 
             
         aligned_data = self.align_data()
+
+        aligned_data['time_since_start'] = time_since_start
+        aligned_data['time_since_last_bite'] = time_since_last_bite
+        aligned_data['num_bites'] = num_bites
+
+        # call model
+
+        out = self.model.predict(np.random.rand(1,139804))
 
         trigger = 1
 
