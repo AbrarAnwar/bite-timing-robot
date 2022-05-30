@@ -28,10 +28,17 @@ class RTGene:
                                                 checkpoint_path_landmark=os.path.join(self.model_nets_path, "phase1_wpdc_vdc.pth.tar"),
                                                 model_points_file=os.path.join(self.model_nets_path, "face_model_68.txt"))
         print('loaded landmark_estimator')
-
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+        os.environ["TF_NUM_INTEROP_THREADS"] = "1"
         from rt_gene.estimate_gaze_pytorch import GazeEstimator
         print('Loading model', os.path.join(self.model_nets_path, 'gaze_model_pytorch_vgg16_prl_mpii_allsubjects1.model'))
         self.gaze_estimator = GazeEstimator("cuda:0", [os.path.join(self.model_nets_path, 'gaze_model_pytorch_vgg16_prl_mpii_allsubjects1.model')])
+
+        # print('importing gaze estimator')
+        # from rt_gene.estimate_gaze_tensorflow import GazeEstimator
+        # print("Using tensorflow backend")
+        # self.gaze_estimator = GazeEstimator("/gpu:0", [os.path.join(self.model_nets_path, 'Model_allsubjects1.h5')])
 
         print('loaded gaze_estimator')
 

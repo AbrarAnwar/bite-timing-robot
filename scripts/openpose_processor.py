@@ -37,6 +37,7 @@ class OpenPose:
         params['render_pose'] = 1
         params['display'] = 0
         params['net_resolution'] = "-1x256"
+        # params['net_resolution'] = "-1x240"
         # params['disable_multi_thread'] = True
 
         if face:
@@ -47,14 +48,18 @@ class OpenPose:
 
         params['face'] = 1
         params['face_net_resolution'] = "320x320"
+        # params['face_net_resolution'] = "256x256"
+
         # params['face_detector'] = 1
         # params['body'] = 1
-        params['disable_multi_thread'] = True
+        params['disable_multi_thread'] = False
 
 
         if not body:
             params['face_detector'] = 1
             params['body'] = 0
+
+        self.body = body
 
 
         # Starting OpenPose
@@ -241,7 +246,7 @@ class OpenPose:
         if num_faces != 0:
             if self.face:
                 num_persons = num_faces
-                # print(num_faces)
+                print('num_faces', num_faces)
                 fr.persons = [Person() for _ in range(num_persons)]
 
             for person in range(num_persons):

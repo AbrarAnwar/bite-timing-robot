@@ -33,6 +33,11 @@ import copy
 
 from ml_models import SocialDiningModel
 
+import pandas as pd
+
+import threading
+from multiprocessing.pool import ThreadPool
+import concurrent.futures
 PERSON1 = -180 # +/- 180
 PERSON2 = 60
 PERSON3 = -60
@@ -53,6 +58,8 @@ class BiteTrigger:
         self.bridge = CvBridge()
 
         self.frame = None
+        self.mutex = Lock()
+
 
         # self.openposes = []
         # for i in range(3):
@@ -64,12 +71,13 @@ class BiteTrigger:
 
 
         self.openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id)
+
         # self.openposes = [self.openpose, self.openpose, self.openpose]
 
         # NOTE: UNCOMMENT THE ONE BELOW IF I DON'T WANT TO USE BODY DETECTION (like for target participant!)
-        self.face_openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id, face=True, body=False)
+        # self.face_openpose = OpenPose(rospy.wait_for_message("/camera1/" + depth_topic, CompressedImage), self.frame_id, face=True, body=False)
         # self.face_openposes = [self.face_openpose, self.face_openpose, self.face_openpose]
-        self.openposes = [self.face_openpose, self.openpose, self.openpose] # 
+        self.openposes = [self.openpose, self.openpose, self.openpose] # 
 
         # self.rt_gene = RTGene(rospy.wait_for_message("/camera1/" + color_topic, CompressedImage))
         # self.rt_genes = [self.rt_gene, self.rt_gene, self.rt_gene]
@@ -85,7 +93,7 @@ class BiteTrigger:
 
         self.face_buffers = [collections.deque(maxlen=180) for _ in range(3)] # 90 is 6 seconds
 
-        self.gaze_buffers = [collections.deque(maxlen=180) for _ in range(3)] # 90 is 6 seconds
+        self.gaze_buffers = [collections.deque(maxlen=180*2) for _ in range(3)] # 90 is 6 seconds
 
 
         self.audio_buffer = collections.deque(maxlen=180*4)
@@ -118,7 +126,9 @@ class BiteTrigger:
 
         self.model = SocialDiningModel('Linear SVM')
 
-        self.mutex = Lock()
+        # import multiprocessing
+        # manager = multiprocessing.Manager()
+        self.pool = ThreadPool(processes=3)
 
     def create_data_subs(self):
         print('Creating data subs')
@@ -159,6 +169,15 @@ class BiteTrigger:
             self.gaze_sub1 = rospy.Subscriber('/camera1/gaze', GazeData, lambda img, i=i: self.gaze_callback(img, 0, i, gaze_num_threads) , queue_size=queue_size, buff_size=buff_size)
             self.gaze_sub2 = rospy.Subscriber('/camera2/gaze', GazeData, lambda img, i=i: self.gaze_callback(img, 1, i, gaze_num_threads) , queue_size=queue_size, buff_size=buff_size)
             self.gaze_sub3 = rospy.Subscriber('/camera3/gaze', GazeData, lambda img, i=i: self.gaze_callback(img, 2, i, gaze_num_threads) , queue_size=queue_size, buff_size=buff_size)
+
+
+        # self.subs1 = [message_filters.Subscriber("/camera1/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size),
+        #                 message_filters.Subscriber("/camera2/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size),
+        #                 message_filters.Subscriber("/camera3/" + self.color_topic, CompressedImage, queue_size=queue_size, buff_size=buff_size)]
+
+
+        # self.data_sub1 = message_filters.ApproximateTimeSynchronizer(self.subs1, queue_size, .1)
+        # self.data_sub1.registerCallback(lambda img1,img2,img3, i=0: self.data_callback(img1,img2,img3, 0, i, gaze_num_threads))
 
 
         self.audio_sub = rospy.Subscriber('/audio', AudioData, self.audio_callback)
@@ -210,6 +229,79 @@ class BiteTrigger:
     ########################################################################################################################
     ### Openpose and image callbacks
     ########################################################################################################################
+    def worker(self, img, num_callback):
+        frame = self.openposes[num_callback].processOpenPose(img)
+        return num_callback, frame
+
+    def all_data_callback(self, img,img2,img3, num_callback, thread_idx, num_threads):
+        if img.header.seq % 2 == 0:
+            return # drop every other frame!
+
+        # if not(img.header.seq % num_threads == thread_idx):
+        #     return
+
+        if num_callback == 0:
+            if self.last_seq_1+ 2 != img.header.seq:
+                self.dropped_msgs_1 += 1
+                print("Openpose Processing Dropped msg: ", self.dropped_msgs_1, " seq: ", img.header.seq, " last seq: ", self.last_seq_1)
+            self.last_seq_1 = img.header.seq
+
+
+        recieved_time = rospy.Time.now()
+
+        inputs = [img, img2, img3]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_input = {executor.submit(self.worker, inp, i): inp for i, inp in enumerate(inputs)}
+
+            for future in concurrent.futures.as_completed(future_to_input):
+                i, frame = future.result()
+                all_data = {'header':img.header, 'openpose':frame}
+                with self.mutex:
+                    # condition 1. there is no face data, then use previous frame data
+                    # print(len(self.data_buffers[num_callback]), 'callback: ', num_callback) 
+                    # print(frame)
+                    if len(frame.persons) == 0:
+                        if len(self.data_buffers[i]) > 0:
+                            all_data = self.data_buffers[i][-1]['data']
+                            all_data['header'] = img.header
+                        else:
+                            print("1. data callback is invalid", i)
+                            continue
+                    # condition 2. there is a person, but there is no face data
+                    elif len(frame.persons) > 0 and len(frame.persons[0].face) == 0:
+                        if len(self.data_buffers[i]) > 0:
+                            prev_frame = self.data_buffers[i][-1]['data']['openpose']
+                            frame.persons[0].face = prev_frame.persons[0].face
+                            all_data['openpose'] = frame
+                        else:
+                            print("2. data callback is invalid", i)
+                            continue
+                    # condition 3. there is a person and no body
+                    elif len(frame.persons) > 0 and len(frame.persons[0].bodyParts) == 0:
+                        # check if we are supposed to have body data, let's then look at previous values
+                        if self.openposes[i].body == True:
+                            if len(self.data_buffers[i]) > 0:
+                                prev_frame = self.data_buffers[i][-1]['data']['openpose']
+                                frame.persons[0].bodyParts = prev_frame.persons[0].bodyParts
+                                all_data['openpose'] = frame
+                            else:
+                                print("3. data callback is invalid", i)
+                                continue
+                            
+
+
+
+                    # after reselecting the frame, we can compute the order again
+                    face_kp, body_kp = self.indexOpenposeFrame(frame)
+                    all_data['face_kp'] = face_kp
+                    all_data['body_kp'] = body_kp
+
+                    # normal condition. we have a face and a body
+                    self.data_buffers[i].append({'time':recieved_time, 'data':all_data})
+
+
+
     def data_callback(self, img, num_callback, thread_idx, num_threads):
         if img.header.seq % 2 == 0:
             return # drop every other frame!
@@ -225,10 +317,54 @@ class BiteTrigger:
 
 
         recieved_time = rospy.Time.now()
-        frame = self.openposes[num_callback].processOpenPose(img)
-        all_data = {'header':img.header, 'image':img, 'openpose':frame}
+
+        
+        i = num_callback
+        frame = self.openposes[i].processOpenPose(img)
+        
+        all_data = {'header':img.header, 'openpose':frame}
         with self.mutex:
-            self.data_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
+            # condition 1. there is no face data, then use previous frame data
+            # print(len(self.data_buffers[num_callback]), 'callback: ', num_callback) 
+            # print(frame)
+            if len(frame.persons) == 0:
+                if len(self.data_buffers[i]) > 0:
+                    all_data = self.data_buffers[i][-1]['data']
+                    all_data['header'] = img.header
+                else:
+                    print("1. data callback is invalid", i)
+                    return
+            # condition 2. there is a person, but there is no face data
+            elif len(frame.persons) > 0 and len(frame.persons[0].face) == 0:
+                if len(self.data_buffers[i]) > 0:
+                    prev_frame = self.data_buffers[i][-1]['data']['openpose']
+                    frame.persons[0].face = prev_frame.persons[0].face
+                    all_data['openpose'] = frame
+                else:
+                    print("2. data callback is invalid", i)
+                    return
+            # condition 3. there is a person and no body
+            elif len(frame.persons) > 0 and len(frame.persons[0].bodyParts) == 0:
+                # check if we are supposed to have body data, let's then look at previous values
+                if self.openposes[i].body == True:
+                    if len(self.data_buffers[i]) > 0:
+                        prev_frame = self.data_buffers[i][-1]['data']['openpose']
+                        frame.persons[0].bodyParts = prev_frame.persons[0].bodyParts
+                        all_data['openpose'] = frame
+                    else:
+                        print("3. data callback is invalid", i)
+                        return
+                    
+
+            # after reselecting the frame, we can compute the order again
+            face_kp, body_kp = self.indexOpenposeFrame(frame)
+            all_data['face_kp'] = face_kp
+            all_data['body_kp'] = body_kp
+
+            # normal condition. we have a face and a body
+            self.data_buffers[i].append({'time':recieved_time, 'data':all_data})
+
+
 
         if num_callback == 0:
             # for debugging
@@ -237,6 +373,22 @@ class BiteTrigger:
             finish = rospy.Time.now().to_sec()
             # print('pose processing time: \t', img.header.seq, 1/(finish-self.last_process_time))
             self.last_process_time = finish
+
+    def indexOpenposeFrame(self, frame):
+        # We assume 1 person per frame
+        face_kp = []
+        body_kp = []
+        if len(frame.persons) > 0:        
+            for i in range(len(frame.persons[0].face)):
+                face = frame.persons[0].face[i]
+                face_kp.append([face.point.x, face.point.y])
+
+            for i in range(len(frame.persons[0].bodyParts)):
+                body = frame.persons[0].bodyParts[i]
+                body_kp.append([body.point.x, body.point.y])
+
+        return np.array(face_kp), np.array(body_kp)
+            
         
 
 
@@ -288,7 +440,6 @@ class BiteTrigger:
         #     return
         # check only on one thread
         if num_callback == 0:
-
             if self.last_seq_2 + 2 != msg.header.seq:
                 self.dropped_msgs_2 += 1
                 print("bite_trigger. gaze Processing Dropped msg: ",self.dropped_msgs_2, " seq: ", msg.header.seq, " last seq: ", self.last_seq_2)
@@ -298,13 +449,21 @@ class BiteTrigger:
 
 
         recieved_time = rospy.Time.now()
-        # frame = self.face_openposes[num_callback].processOpenPose(img, depth)
-        # attach all relevant features here
-
 
         all_data = {'header':msg.header, 'gaze':msg.gaze, 'headpose':msg.headpose}
         # add to buffer
         with self.mutex:
+            if msg.gaze.phi == 0 and msg.gaze.theta == 0:
+                # ensure we have a valid gaze
+                if len(self.gaze_buffers[num_callback]) > 0:
+                    prev_data = self.gaze_buffers[num_callback][-1]['data']
+                    all_data['gaze'] = prev_data['gaze']
+                    all_data['headpose'] = prev_data['headpose']
+                else:
+                    print("WARNING: gaze data is invalid", num_callback)
+                    return
+                # all_data = self.gaze_buffers[num_callback][-1]['data']
+                # all_data['header'] = msg.header
             self.gaze_buffers[num_callback].append({'time':recieved_time, 'data':all_data})
 
         # look at callback 0 to verify speed
@@ -380,6 +539,66 @@ class BiteTrigger:
     ########################################################################################################################
     ### ROS Service management
     ########################################################################################################################
+
+    def interpolate_gaze_headpose(self, input_data):
+        # df = pd.read_csv("/Users/tongwu/Downloads/rt_gene_feats.csv", usecols=['name', 'gaze'])
+        # turn inputs into df
+
+        filtered = []
+        for i in range(len(input_data)):
+            gaze = [input_data[i]['gaze'].phi, input_data[i]['gaze'].theta]
+            headpose = [input_data[i]['headpose'].phi, input_data[i]['headpose'].theta]
+
+            if gaze == [0,0]:
+                print("NONE HAPPENED")
+                continue
+            
+            filtered.append({'gaze_phi':gaze[0], 'gaze_theta':gaze[1], 'headpose_phi':headpose[0], 'headpose_theta':headpose[1], 'name':i})
+            
+
+        df = pd.DataFrame(filtered)
+
+        l = []
+        for i in range(1, len(df) - 1):
+            pre = df.iloc[i-1]['name']
+            cur = df.iloc[i]['name']
+            if int(pre) != int(cur) - 1:
+                diff = int(cur) - int(pre)
+                for j in range(diff):
+                    should = int(pre) + j
+                    l.append(should)
+            else:
+                l.append(df.iloc[i-1]['name'])
+
+
+        new_col = pd.DataFrame({"new_name": l})
+        df = df.set_index("name")
+        new_col = new_col.set_index("new_name")
+        df_new = new_col.join(df)
+        df_new = df_new.interpolate() # NOTE: EXPENSIVE OPERATION!
+
+
+        # size should be 90, so we fill in df_new to be the last valid value!
+        end = []
+        last_valid = {'gaze_phi':df_new.iloc[-1]['gaze_phi'], 'gaze_theta':df_new.iloc[-1]['gaze_theta'], 'headpose_phi':df_new.iloc[-1]['headpose_phi'], 'headpose_theta':df_new.iloc[-1]['headpose_theta']}
+        for i in range(len(l), 90):
+            last_valid.update({'new_name':i})
+            end.append(last_valid)
+            # df_new =df_new.append({'gaze_phi':df_new.iloc[-1]['gaze_phi'], 'gaze_theta':df_new.iloc[-1]['gaze_theta'], 'headpose_phi':df_new.iloc[-1]['headpose_phi'], 'headpose_theta':df_new.iloc[-1]['headpose_theta'], 'new_name':i}, ignore_index=True)
+        df_new = df_new.append(end, ignore_index=True)
+
+        # do the same thing from 0 to min value
+        first_valid = {'gaze_phi':df_new.iloc[0]['gaze_phi'], 'gaze_theta':df_new.iloc[0]['gaze_theta'], 'headpose_phi':df_new.iloc[0]['headpose_phi'], 'headpose_theta':df_new.iloc[0]['headpose_theta']}
+        begin = []
+        for i in range(0, int(l[0])):
+            first_valid.update({'new_name':i})
+            begin.append(first_valid)
+        df_new = pd.concat([pd.DataFrame(begin), df_new])
+
+        print(df_new)
+        return df_new
+
+
     def align_data(self):
         # we have 3 data inputs, direction, audio, and video
         # they are inside data_buffer, audio_buffer, and direction_buffer
@@ -416,15 +635,18 @@ class BiteTrigger:
         max_video_seq = np.max(video_seqs)
 
         if max_gaze_seq > max_video_seq:
+            print("Case 1")
             # then look for where max_video_seq occurs in gaze_seqs
-            gaze_idxs = np.where(gaze_seqs == max_video_seq)[0]
+            gaze_idxs = np.where(gaze_seqs <= max_video_seq)[0]
             video_idxs = np.arange(len(video_seqs))
         elif max_video_seq > max_gaze_seq:
+            print("Case 2")
             # then look for where max_gaze_seq occurs in video_seqs
-            video_idxs = np.where(video_seqs < max_gaze_seq)[0]
+            video_idxs = np.where(video_seqs <= max_gaze_seq)[0]
             # thus gaze idxs are everything else
             gaze_idxs = np.arange(len(gaze_seqs))
         else:
+            print("Case 3")
             # then they are equal
             video_idxs = np.arange(len(video_seqs))
             gaze_idxs = np.arange(len(gaze_seqs))
@@ -432,6 +654,14 @@ class BiteTrigger:
         # now we take the last 90 frames of each
         video_idxs = video_idxs[-90:]
         gaze_idxs = gaze_idxs[-90:]
+
+        print(gaze_idxs)
+        print(video_idxs)
+
+        # this is in case it's not publishing at the same rate (one is faster than the other)
+        if len(video_idxs) < 90 or len(gaze_idxs) < 90:
+            print("Not enough data to align")
+            return
 
         # these should now be the same length!
 
@@ -470,38 +700,99 @@ class BiteTrigger:
         direction_data = np.array(direction_data)[dir_mapping]
         audio_data = np.array(audio_data)[audio_mapping]
         is_talking = [item['is_talking'] for item in audio_data]
-        print(len(is_talking), len(direction_data))
-        print(len(dir_mapping))
-        print(len(audio_mapping))
 
         who_is_talking = self.who_is_talking(is_talking, direction_data)
-
-        print(direction_data)
-        print(is_talking)
-        print(who_is_talking)
-
-        t = rospy.Time.now().to_sec() 
-        print((t - video_times[0])-6)
 
         # need to return the following:
         # aligned pose frames 1,2,3, gazes 1,2,3
         # who's talking 1,2,3
         # time, count (given by callback messages)
         out_feats = {}
-        out_feats['pose_1'] = data_buffers[0][video_idxs]['data']
-        out_feats['pose_2'] = data_buffers[1][video_idxs]['data']
-        out_feats['pose_3'] = data_buffers[2][video_idxs]['data']
 
-        out_feats['gaze_1'] = gaze_buffers[0][gaze_idxs]['data']
-        out_feats['gaze_2'] = gaze_buffers[1][gaze_idxs]['data']
-        out_feats['gaze_3'] = gaze_buffers[2][gaze_idxs]['data']
 
-        out_feats['who_is_talking'] = who_is_talking # should already be indexed by video_idxs
+
+        # interpolate missing data
+        # print(pd.DataFrame([item['data'] for item in gaze_buffers[0]])['gaze'] )
+        # print(np.array(gaze_buffers[0])[gaze_idxs]['data'])
+
+
+
+
+        # GAZE FEATURES. 90*(2+2)
+        print(len(gaze_buffers[0]), len(gaze_buffers[1]), len(gaze_buffers[2]))
+        print(len(gaze_idxs))
+
+        gaze_1_data = np.array([item['data'] for item in gaze_buffers[0]])[gaze_idxs]
+        gazes1 = np.array([ [item['gaze'].phi, item['gaze'].theta] for item in gaze_1_data])
+        headpose1 = np.array([[item['gaze'].phi, item['gaze'].theta] for item in gaze_1_data])
+        out_feats['gaze1'] = gazes1
+        out_feats['headpose1'] = headpose1
+        # out_feats['gaze_1'] = self.interpolate_gaze_headpose(gaze_1_data)
+
+        gaze_2_data = np.array([item['data'] for item in gaze_buffers[1]])[gaze_idxs]
+        gazes2 = np.array([ [item['gaze'].phi, item['gaze'].theta] for item in gaze_2_data])
+        headpose2 = np.array([[item['gaze'].phi, item['gaze'].theta] for item in gaze_2_data])
+        out_feats['gaze2'] = gazes2
+        out_feats['headpose2'] = headpose2
+
+        gaze_3_data = np.array([item['data'] for item in gaze_buffers[2]])[gaze_idxs]
+        gazes3 = np.array([ [item['gaze'].phi, item['gaze'].theta] for item in gaze_3_data])
+        headpose3 = np.array([[item['gaze'].phi, item['gaze'].theta] for item in gaze_3_data])
+        out_feats['gaze3'] = gazes3
+        out_feats['headpose3'] = headpose3
+
+        # OPENPOSE FEATURES
+        op_1_data = np.array([item['data'] for item in data_buffers[0]])[video_idxs]
+        face1 = np.array([item['face_kp'] for item in op_1_data])
+        body1 = np.array([item['body_kp'] for item in op_1_data])
+
+        op_2_data = np.array([item['data'] for item in data_buffers[1]])[video_idxs]
+        face2 = np.array([item['face_kp'] for item in op_2_data])
+        body2 = np.array([item['body_kp'] for item in op_2_data])
+
+
+        op_3_data = np.array([item['data'] for item in data_buffers[2]])[video_idxs]
+        face3 = np.array([item['face_kp'] for item in op_3_data])
+        body3 = np.array([item['body_kp'] for item in op_3_data])
+
+        # delete the right lower body parts
+        if self.openposes[0].body:
+            body1 = np.delete(body1, [10, 11, 13, 14, 18, 19, 20, 21, 22, 23, 24], 1)
+        body2 = np.delete(body2, [10, 11, 13, 14, 18, 19, 20, 21, 22, 23, 24], 1)
+        body3 = np.delete(body3, [10, 11, 13, 14, 18, 19, 20, 21, 22, 23, 24], 1)
+
+        if not self.openposes[0].body:
+            body1 = np.zeros_like(body2)
+
+        out_feats['face1'] = face1
+        out_feats['body1'] = body1
+
+        out_feats['face2'] = face2
+        out_feats['body2'] = body2
+
+        out_feats['face3'] = face3
+        out_feats['body3'] = body3
+
+        # TALKING FEATURES
+        out_feats['person1_is_talking'] = (who_is_talking == 1)
+        out_feats['person2_is_talking'] = (who_is_talking == 2)
+        out_feats['person3_is_talking'] = (who_is_talking == 3)
+
+
         
+        t = rospy.Time.now().to_sec() 
+        print('Time since last video time preprocessing', (t - video_times[0])-6)
+
+
+        # 46980 is the input size
+        # each person is of vector 90*(14*2 + 70*2 + 2 + 2 + 1 + 1)
+        # this will be 90 of the following. pose, face, gaze, head, audio, time
+        # out_feats['person1'] = 
 
         return out_feats
     
     def check_callback(self, msg):
+        start_time = rospy.Time.now().to_sec()
         print("Service call recieved")
         num_bites = msg.num_bites
         time_since_last_bite = msg.time_since_last_bite
@@ -524,7 +815,7 @@ class BiteTrigger:
         trigger = 0
 
         for buffer in self.data_buffers:
-            if len(buffer) < 100: # a little higher than 6 seconds to deal with latency alignment issues
+            if len(buffer) < 95: # a little higher than 6 seconds to deal with latency alignment issues
                 print("Buffer is not full with 6 seconds of information yet...", len(buffer))
                 return CheckBiteTimingResponse(False)
 
@@ -539,10 +830,32 @@ class BiteTrigger:
         aligned_data['time_since_last_bite'] = time_since_last_bite
         aligned_data['num_bites'] = num_bites
 
+        for k, item in aligned_data.items():
+            if type(item) == np.ndarray:
+                print(k, item.shape)
+
         # call model
+        person1 = np.concatenate([aligned_data['face1'][:,:,0],aligned_data['face1'][:,:,1], aligned_data['body1'][:,:,0], aligned_data['body1'][:,:,1], aligned_data['gaze1'], aligned_data['headpose1'], aligned_data['person1_is_talking'].reshape(-1,1), np.array(time_since_last_bite).repeat(90).reshape(-1,1) ], axis=1).flatten()
+        person2 = np.concatenate([aligned_data['face2'][:,:,0],aligned_data['face2'][:,:,1], aligned_data['body2'][:,:,0], aligned_data['body2'][:,:,1], aligned_data['gaze2'], aligned_data['headpose2'], aligned_data['person2_is_talking'].reshape(-1,1), np.array(time_since_last_bite).repeat(90).reshape(-1,1) ], axis=1).flatten()
+        person3 = np.concatenate([aligned_data['face3'][:,:,0],aligned_data['face3'][:,:,1], aligned_data['body3'][:,:,0], aligned_data['body3'][:,:,1], aligned_data['gaze3'], aligned_data['headpose3'], aligned_data['person3_is_talking'].reshape(-1,1), np.array(time_since_last_bite).repeat(90).reshape(-1,1) ], axis=1).flatten()
 
-        out = self.model.predict(np.random.rand(1,139804))
+        # person2 = np.concatenate([aligned_data['face2'], aligned_data['body2'], aligned_data['gaze2'], aligned_data['headpose2'], aligned_data['person2_is_talking'].reshape(1,-1), np.array(time_since_last_bite).repeat(90).reshape(1,-1) ], axis=1).flatten()
+        # person3 = np.concatenate([aligned_data['face3'], aligned_data['body3'], aligned_data['gaze3'], aligned_data['headpose3'], aligned_data['person3_is_talking'].reshape(1,-1), np.array(time_since_last_bite).repeat(90).reshape(1,-1) ], axis=1).flatten()
 
+        print('person1', person1.shape)
+        print('person2', person2.shape)
+        print('person3', person3.shape)
+
+        combined = np.concatenate([person1, person2, person3])
+        print('combined', combined.shape)
+
+        out = self.model.predict(combined.reshape(1, -1))
+
+
+        print('out', out)
+
+        t = rospy.Time.now().to_sec() 
+        print('Processing time in callback', t - start_time) # takes about 2.5 seconds
         trigger = 1
 
         if trigger == 1:

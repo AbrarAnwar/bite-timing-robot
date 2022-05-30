@@ -32,7 +32,7 @@ models = {"Linear SVM": SVM(c=1, kernel='linear'),
             "SGD": SGD(), 
             "MLP": MLP()
         }
-models_path = {"Linear SVM":'/home/abrar/feeding_ws/src/bite-timing-robot/weights/linear_svm_social.pkl'}
+models_path = {"Linear SVM":'/home/abrar/feeding_ws/src/bite-timing-robot/weights/linear_svm_social_15fps_nohand_all_audio.pkl'}
 
 
 
@@ -50,3 +50,5 @@ class SocialDiningModel:
 
     def load(self, path):
         self.model = pickle.load(open(path, 'rb'))
+
+# import pdb; pdb.set_trace()
