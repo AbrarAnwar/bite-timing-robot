@@ -31,6 +31,7 @@ add_service_files(
   FILES
   CheckBiteTiming.srv
   MouthOpen.srv
+  Toggle.srv
 )
 
 generate_messages(

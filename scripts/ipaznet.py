@@ -13,8 +13,7 @@ from keras.layers.pooling import GlobalAvgPool2D
 # from keras.layers.merge import concatenate
 from keras.layers import concatenate
 from keras.regularizers import l2
-from keras.optimizers import SGD
-from keras.optimizers import Adam
+from tensorflow.keras.optimizers import Adam
 from keras.callbacks import EarlyStopping
 from keras.callbacks import ModelCheckpoint
 import numpy as np
@@ -27,8 +26,6 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
 import sys
-from keras.optimizers import Adam
-from keras.optimizers import SGD
 from keras.callbacks import EarlyStopping
 from keras.callbacks import ModelCheckpoint
 from keras.losses import categorical_crossentropy, binary_crossentropy
@@ -80,92 +77,6 @@ time_series = np.load("data/main_np.npy", allow_pickle=True)
 subject2 = np.load("data/dinner1_np.npy", allow_pickle=True)
 subject3 = np.load("data/dinner2_np.npy", allow_pickle=True)
 '''
-# time_series = np.load("data/target_np.npy", allow_pickle=True)
-# subject2 = np.load("data/right_np.npy", allow_pickle=True)
-# subject3 = np.load("data/left_np.npy", allow_pickle=True)
-# i3d = np.load("data/i3d_np.npy", allow_pickle=True)
-
-
-# X = np.nan_to_num(time_series)
-# subject2 = np.nan_to_num(subject2)
-# subject3 = np.nan_to_num(subject3)
-
-# assert not np.any(np.isnan(X))
-# assert not np.any(np.isnan(subject2))
-# assert not np.any(np.isnan(subject3))
-
-# y = np.append(np.ones(6830), np.zeros(2486))
-
-# counts = np.bincount(y.astype(int))
-
-# y = y.reshape((-1, 1)).T.flatten()
-
-# print(len(X))
-# print(len(y))
-
-
-# # normalization
-# min_max_scaler = preprocessing.MinMaxScaler()
-# X_norm = min_max_scaler.fit_transform(X.reshape(-1, 256))
-# X_norm = X_norm.reshape(-1, 180 * 256)
-
-# min_max_scaler = preprocessing.MinMaxScaler()
-# X2_norm = min_max_scaler.fit_transform(subject2.reshape(-1, 256))
-# X2_norm = X2_norm.reshape(-1, 180 * 256)
-
-# min_max_scaler = preprocessing.MinMaxScaler()
-# X3_norm = min_max_scaler.fit_transform(subject3.reshape(-1, 256))
-# X3_norm = X3_norm.reshape(-1, 180 * 256)
-
-# i3d = i3d.reshape(len(X), 1024)
-
-# X = np.concatenate((X_norm, X2_norm, X3_norm, i3d), axis=1)
-# # shuffle and split
-# # train_index, test_index = shuffle_train_test_split(len(y), 0.8)
-# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3)
-
-# '''
-# rus = RandomUnderSampler(random_state=0)
-# X_train, y_train = rus.fit_resample(X_train, y_train)
-# '''
-# i3d_train = X_train[:, 3*180*256:].reshape((-1, 1024))
-# i3d_test = X_test[:, 3*180*256:].reshape((-1, 1024))
-# X_train = X_train[:, :3*180*256].reshape((-1, 3*180, 256))
-# X_test = X_test[:, :3*180*256].reshape((-1, 3*180, 256))
-
-# X1_train = X_train[:, :180, :]
-# X2_train = X_train[:, 180: 2*180, :]
-# X3_train = X_train[:, 2*180:3*180, :]
-# X1_test = X_test[:, :180, :]
-# X2_test = X_test[:, 180: 2*180, :]
-# X3_test = X_test[:, 2*180:3*180, :]
-
-# #y_train = pd.get_dummies(y_train, columns=['l1', 'l2'])
-# #y_test = pd.get_dummies(y_test, columns=['l1', 'l2'])
-
-
-
-# assert not np.any(np.isnan(X1_train))
-# assert not np.any(np.isnan(y_train))
-
-# print("Training")
-# print(X1_train.shape)
-# print(X2_train.shape)
-# print(X3_train.shape)
-# print(i3d_train.shape)
-# print(y_train.shape)
-
-# print("Test")
-# print(X1_test.shape)
-# print(X2_test.shape)
-# print(X3_test.shape)
-# print(i3d_test.shape)
-# print(y_test.shape)
-
-
-# print(X1_train[30, :10, :10])
-# print(X2_train[300, 100:120, 250:])
-# print(X3_train[3000, 150:160, 250:])
 
 
 class PazNet:
@@ -287,15 +198,15 @@ class PazNet:
             keras.metrics.AUC(name='prc', curve='PR'), # precision-recall curve
         ]
 
-    def load(self, path):
-        self.trained_model = keras.models.load_model("checkpoints/best_person1_32_32_0.0001_0_0.1_128.h5",
+    def load(self, path="../../data/models/interleaved_net_6s_he_nohand_15fps_0.001_0.0_0.005_32.h5"):
+        self.model = keras.models.load_model(path,
                                                 custom_objects={'get_f1': get_f1})
-        self.predict_layer = Model(inputs=self.trained_model.input, outputs=self.trained_model.output)
+        self.predict_layer = Model(inputs=self.model.input, outputs=self.model.output)
 
 
     def predict(self, person1, person2, person3):
-
-
+        print("IN PAZNET PREDICT WITH", perosn1.shape)
+        
         predict_layer_output = self.predict_layer.predict(x=[person1, person2, person3])
         print(predict_layer_output)
 
@@ -306,5 +217,118 @@ class PazNet:
         from sklearn.metrics import f1_score
 
         print(get_f1(y[test_index], predicted_y))
+
+    '''
+        learning_rate = 0.001
+        batch_size = 128
+        decay_rate = 0
+        l2_value = 0
+        epoch = 10000
+    '''
+
+    def train(self, save_path, epoch=1000, batch_size=128, lr=0.001, l2_value=0, patience=200):
+        time_series = np.load("data/target_np.npy", allow_pickle=True)
+        subject2 = np.load("data/right_np.npy", allow_pickle=True)
+        subject3 = np.load("data/left_np.npy", allow_pickle=True)
+
+        X = np.nan_to_num(time_series)
+        subject2 = np.nan_to_num(subject2)
+        subject3 = np.nan_to_num(subject3)
+
+        assert not np.any(np.isnan(X))
+        assert not np.any(np.isnan(subject2))
+        assert not np.any(np.isnan(subject3))
+
+        y = np.append(np.ones(6830), np.zeros(2486)) # TODO: what are these hardcoded values? i think it's the known number of positive and negative samples
+
+        counts = np.bincount(y.astype(int))
+
+        y = y.reshape((-1, 1)).T.flatten()
+
+        print(len(X))
+        print(len(y))
+
+
+        # normalization
+        min_max_scaler = preprocessing.MinMaxScaler()
+        X_norm = min_max_scaler.fit_transform(X.reshape(-1, 256))
+        X_norm = X_norm.reshape(-1, 180 * 256)
+
+        min_max_scaler = preprocessing.MinMaxScaler()
+        X2_norm = min_max_scaler.fit_transform(subject2.reshape(-1, 256))
+        X2_norm = X2_norm.reshape(-1, 180 * 256)
+
+        min_max_scaler = preprocessing.MinMaxScaler()
+        X3_norm = min_max_scaler.fit_transform(subject3.reshape(-1, 256))
+        X3_norm = X3_norm.reshape(-1, 180 * 256)
+
+        X = np.concatenate((X_norm, X2_norm, X3_norm), axis=1)
+        # shuffle and split
+        # train_index, test_index = shuffle_train_test_split(len(y), 0.8)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3)
+
+        '''
+        rus = RandomUnderSampler(random_state=0)
+        X_train, y_train = rus.fit_resample(X_train, y_train)
+        '''
+        ## TODO: FIGURE OUT WHAT THESE SPLITS ARE?????
+
+        X_train = X_train[:, :3*180*256].reshape((-1, 3*180, 256))
+        X_test = X_test[:, :3*180*256].reshape((-1, 3*180, 256))
+
+        X1_train = X_train[:, :180, :]
+        X2_train = X_train[:, 180: 2*180, :]
+        X3_train = X_train[:, 2*180:3*180, :]
+        X1_test = X_test[:, :180, :]
+        X2_test = X_test[:, 180: 2*180, :]
+        X3_test = X_test[:, 2*180:3*180, :]
+
+        #y_train = pd.get_dummies(y_train, columns=['l1', 'l2'])
+        #y_test = pd.get_dummies(y_test, columns=['l1', 'l2'])
+
+
+        assert not np.any(np.isnan(X1_train))
+        assert not np.any(np.isnan(y_train))
+
+        print("Training")
+        print(X1_train.shape)
+        print(X2_train.shape)
+        print(X3_train.shape)
+        print(y_train.shape)
+
+        print("Test")
+        print(X1_test.shape)
+        print(X2_test.shape)
+        print(X3_test.shape)
+        print(y_test.shape)
+
+
+        print(X1_train[30, :10, :10])
+        print(X2_train[300, 100:120, 250:])
+        print(X3_train[3000, 150:160, 250:])
+
+        weight_for_0 = 1 / counts[0]
+        weight_for_1 = 1 / counts[1]
+        class_weight = {0: weight_for_0, 1: weight_for_1}
+        print("weights: ", class_weight)
+
+        # learning rate decay
+        lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=learning_rate,
+            decay_steps=1000,
+            decay_rate=decay_rate)
+
+        # early stopping
+        es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=patience)
+
+        # save the best model by measuring F1-score
+        mc = ModelCheckpoint("checkpoints/interleaved_net_6s_he_visual_time_audio" + str(
+            learning_rate) + "_" + str(decay_rate) + "_" + str(l2_value) + '_' + str(batch_size) + ".h5",
+                            monitor='val_get_f1', mode='max', verbose=1, save_best_only=True)
+
+        model.compile(optimizer=Adam(learning_rate=lr_schedule), loss=binary_crossentropy, metrics=[get_f1, metrics])
+
+        history = model.fit(x=[X1_train, X2_train, X3_train], y=y_train, epochs=epoch,
+                            batch_size=batch_size, validation_data=([X1_test, X2_test, X3_test], y_test), callbacks=[es, mc])
 
 PazNet()
