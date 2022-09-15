@@ -1,5 +1,3 @@
-Based on edits from the ros_openpose repo. Likely does not work right now; however, ros_openpose_synchronous.py and bite_trigger.py do work when placed into the original ros_openpose package.
+Based on edits from the ros_openpose repo.
 
-Needs work to make an independent package!
-
-Also, the CMakeLists likely does not work right now. Compiling this reduced package has not been tested, and needs edits!
+This repository is a ROS package that manages the feature processing and conditions for the robot user study in our paper: [Human-Robot Commensality: Bite Timing Prediction for Robot-Assisted Feeding in Groups](https://openreview.net/forum?id=zab87DCAYIF) 
